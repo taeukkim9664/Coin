@@ -1,0 +1,12 @@
+name = "kimchi-kimp-worker"
+main = "src/worker.js"
+compatibility_date = "2026-03-05"
+
+[durable_objects]
+bindings = [
+  { name = "KIMP_HUB", class_name = "KimpHub" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["KimpHub"]
