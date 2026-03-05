@@ -258,7 +258,8 @@ let isRefreshing = false;
 let liveRefreshMs = DEFAULT_REFRESH_MS;
 let consecutiveLoadFailures = 0;
 let hasSuccessfulRender = false;
-const USE_DO_STREAM = true;
+const PRESET_WS_URL = normalizeWsUrl(window.KIMP_WS_URL || localStorage.getItem('KIMP_WS_URL'));
+const USE_DO_STREAM = Boolean(PRESET_WS_URL);
 let doEnabled = USE_DO_STREAM;
 let doSocket = null;
 let doReconnectDelayMs = 1000;
@@ -268,6 +269,21 @@ let doRenderTimer = null;
 let doConnectFailures = 0;
 let doConnectedOnce = false;
 const DO_MAX_FAIL_BEFORE_FALLBACK = 3;
+
+function normalizeWsUrl(raw) {
+    if (!raw) return '';
+    const value = String(raw).trim();
+    if (!value) return '';
+    try {
+        const url = new URL(value, window.location.href);
+        if (url.protocol === 'http:') url.protocol = 'ws:';
+        if (url.protocol === 'https:') url.protocol = 'wss:';
+        if (url.protocol !== 'ws:' && url.protocol !== 'wss:') return '';
+        return url.toString();
+    } catch (_error) {
+        return '';
+    }
+}
 
 function formatNumber(value) {
     return Math.round(value).toLocaleString('ko-KR');
@@ -304,16 +320,54 @@ function chunkArray(items, size) {
     return chunks;
 }
 
-async function fetchJson(url) {
-    const response = await fetch(url);
-    if (!response.ok) {
-        throw new Error(`HTTP ${response.status} for ${url}`);
-    }
-    return response.json();
-}
-
 function isNetworkLikeError(error) {
     return error instanceof TypeError || String(error).includes('Failed to fetch');
+}
+
+function withTimeoutFetch(url, timeoutMs = 7000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    return fetch(url, { signal: controller.signal })
+        .finally(() => {
+            clearTimeout(timer);
+        });
+}
+
+function buildCorsProxyUrls(url) {
+    if (!/^https?:\/\//i.test(url)) return [];
+    const encoded = encodeURIComponent(url);
+    return [
+        `https://api.allorigins.win/raw?url=${encoded}`,
+    ];
+}
+
+async function fetchJson(url) {
+    try {
+        const response = await withTimeoutFetch(url);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status} for ${url}`);
+        }
+        return response.json();
+    } catch (error) {
+        if (!isNetworkLikeError(error)) {
+            throw error;
+        }
+
+        const proxyUrls = buildCorsProxyUrls(url);
+        let lastError = error;
+        for (const proxyUrl of proxyUrls) {
+            try {
+                const proxyResponse = await withTimeoutFetch(proxyUrl);
+                if (!proxyResponse.ok) {
+                    throw new Error(`HTTP ${proxyResponse.status} for ${proxyUrl}`);
+                }
+                return proxyResponse.json();
+            } catch (proxyError) {
+                lastError = proxyError;
+            }
+        }
+        throw lastError;
+    }
 }
 
 async function fetchJsonFromAny(urls) {
@@ -805,14 +859,18 @@ async function loadMarketRows(options = {}) {
             getSymbolNameMap(),
             fetchUsdKrwRate(),
         ]);
-        const [domesticMap, globalMap] = await Promise.all([
-            fetchDomesticByExchange(selectedDomesticKey, nameMap),
-            fetchGlobalByExchange(selectedGlobalKey),
+        const [domesticResult, globalResult] = await Promise.all([
+            fetchDomesticWithFallback(selectedDomesticKey, nameMap),
+            fetchGlobalWithFallback(selectedGlobalKey),
         ]);
 
         if (requestId !== latestRequestId) return;
-        selectedExchangePair.textContent = `${domestic.label} vs ${global.label}`;
-        tableState.globalExchangeLabel = global.label;
+        const domesticMap = domesticResult.data;
+        const globalMap = globalResult.data;
+        const domesticLabel = domesticExchangeMeta[domesticResult.exchangeKey]?.label || domestic.label;
+        const globalLabel = globalExchangeMeta[globalResult.exchangeKey]?.label || global.label;
+        selectedExchangePair.textContent = `${domesticLabel} vs ${globalLabel}`;
+        tableState.globalExchangeLabel = globalLabel;
 
         const rows = [];
         Object.values(domesticMap).forEach((domesticTicker) => {
@@ -887,7 +945,7 @@ function startLiveRefresh() {
 }
 
 function getDoWsUrl() {
-    const explicit = window.KIMP_WS_URL || localStorage.getItem('KIMP_WS_URL');
+    const explicit = normalizeWsUrl(PRESET_WS_URL || window.KIMP_WS_URL || localStorage.getItem('KIMP_WS_URL'));
     if (explicit) return explicit;
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     return `${proto}//${window.location.host}/ws`;
