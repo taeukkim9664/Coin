@@ -30,32 +30,7 @@ export default {
     }
 
     if (url.pathname === "/asset-status") {
-      const symbol = String(url.searchParams.get("symbol") || "").toUpperCase();
-      const domestic = String(url.searchParams.get("domestic") || "upbit");
-      const foreign = String(url.searchParams.get("foreign") || "binance");
-
-      if (!symbol) {
-        return jsonResponse({ error: "symbol is required" }, 400);
-      }
-
-      try {
-        const payload = await getAssetStatusPayload(symbol, domestic, foreign, env);
-        return jsonResponse(payload, 200);
-      } catch (error) {
-        return jsonResponse(
-          {
-            symbol,
-            domestic,
-            foreign,
-            exchanges: {
-              [domestic]: emptyExchangeStatus(domestic),
-              [foreign]: emptyExchangeStatus(foreign),
-            },
-            error: String(error?.message || error),
-          },
-          200
-        );
-      }
+      return stub.fetch(new Request(new URL("/asset-status" + url.search, request.url), request));
     }
 
     return new Response("Not found", { status: 404 });
@@ -81,12 +56,41 @@ export class KimpHub {
     this.symbolRefreshTimer = null;
     this.fxRefreshTimer = null;
     this.pushTimer = null;
+    this.assetStatusTimer = null;
 
     this.started = false;
+
+    // Asset status cache must live in Durable Object instance memory.
+    this.assetCollectorsRunning = null;
+    this.assetCollectorsUpdatedAt = 0;
+    this.assetByExchange = new Map(); // exchange -> Map(coin -> status)
+    this.assetGateByCoin = new Map(); // coin -> { ts, status }
   }
 
   async fetch(request) {
     const url = new URL(request.url);
+    if (url.pathname === "/asset-status") {
+      const coin = String(url.searchParams.get("coin") || url.searchParams.get("symbol") || "").toUpperCase();
+      if (!coin) {
+        return jsonResponse({ error: "coin is required" }, 400);
+      }
+
+      await this.ensureStarted();
+      await this.ensureAssetCollectors();
+
+      const exchanges = ["upbit", "binance", "bybit", "okx", "bitget", "gate"];
+      const statuses = await Promise.all(exchanges.map((exchange) => this.getAssetStatusForExchange(exchange, coin)));
+
+      return jsonResponse(
+        {
+          coin,
+          updated_at: this.assetCollectorsUpdatedAt || Date.now(),
+          exchanges: statuses,
+        },
+        200
+      );
+    }
+
     if (url.pathname === "/status") {
       return Response.json({
         clients: this.clients.size,
@@ -136,6 +140,10 @@ export class KimpHub {
     this.pushTimer = setInterval(() => {
       this.broadcastSnapshot();
     }, PUSH_INTERVAL_MS);
+
+    this.assetStatusTimer = setInterval(() => {
+      this.ensureAssetCollectors().catch((err) => console.error("ensureAssetCollectors failed", err));
+    }, COLLECTOR_INTERVAL_MS);
   }
 
   webSocketMessage(ws, message) {
@@ -316,6 +324,250 @@ export class KimpHub {
         // ignore
       }
     });
+  }
+
+  isCollectorFresh() {
+    return Date.now() - this.assetCollectorsUpdatedAt < COLLECTOR_INTERVAL_MS;
+  }
+
+  async ensureAssetCollectors() {
+    if (this.isCollectorFresh()) return;
+    if (this.assetCollectorsRunning) {
+      await this.assetCollectorsRunning;
+      return;
+    }
+
+    this.assetCollectorsRunning = (async () => {
+      await Promise.allSettled([
+        this.collectUpbitAssetStatus(),
+        this.collectBinanceAssetStatus(),
+        this.collectBybitAssetStatus(),
+        this.collectOkxAssetStatus(),
+        this.collectBitgetAssetStatus(),
+      ]);
+      this.assetCollectorsUpdatedAt = Date.now();
+    })().finally(() => {
+      this.assetCollectorsRunning = null;
+    });
+
+    await this.assetCollectorsRunning;
+  }
+
+  setExchangeCollectorResult(exchange, byCoinMap) {
+    this.assetByExchange.set(exchange, byCoinMap || new Map());
+  }
+
+  summarizeNetworkStatus(networks) {
+    const validNetworks = Array.isArray(networks) ? networks : [];
+    return {
+      deposit_enabled: validNetworks.some((n) => n.deposit === true),
+      withdraw_enabled: validNetworks.some((n) => n.withdraw === true),
+    };
+  }
+
+  formatExchangeStatus(exchange, networks) {
+    const normalizedNetworks = (Array.isArray(networks) ? networks : []).map((n) => ({
+      network: n.network || "-",
+      deposit: n.deposit === true,
+      withdraw: n.withdraw === true,
+    }));
+    const summary = this.summarizeNetworkStatus(normalizedNetworks);
+    return {
+      exchange,
+      deposit_enabled: summary.deposit_enabled,
+      withdraw_enabled: summary.withdraw_enabled,
+      networks: normalizedNetworks,
+    };
+  }
+
+  unavailableExchangeStatus(exchange, reason = "UNAVAILABLE") {
+    return {
+      exchange,
+      deposit_enabled: false,
+      withdraw_enabled: false,
+      networks: [{ network: reason, deposit: false, withdraw: false }],
+    };
+  }
+
+  async collectUpbitAssetStatus() {
+    const byCoin = new Map();
+    if (!this.env.UPBIT_ACCESS_KEY || !this.env.UPBIT_SECRET_KEY) {
+      this.setExchangeCollectorResult("upbit", byCoin);
+      return;
+    }
+
+    const symbols = await fetchUpbitKrwSymbols();
+    const chunks = chunk(symbols, 12);
+    for (const group of chunks) {
+      const settled = await Promise.allSettled(group.map((coin) => fetchUpbitDepositChanceCoin(coin, this.env)));
+      settled.forEach((result, idx) => {
+        if (result.status !== "fulfilled") return;
+        const coin = group[idx];
+        const payload = result.value || {};
+        const currency = payload?.currency || {};
+        const walletState = String(currency.wallet_state || payload.wallet_state || "").toLowerCase();
+        const support = Array.isArray(currency.wallet_support)
+          ? currency.wallet_support.map((s) => String(s).toLowerCase())
+          : [];
+        const deposit = walletState === "working" && support.includes("deposit");
+        const withdraw = walletState === "working" && support.includes("withdraw");
+        byCoin.set(coin, this.formatExchangeStatus("upbit", [{ network: "MAIN", deposit, withdraw }]));
+      });
+    }
+    this.setExchangeCollectorResult("upbit", byCoin);
+  }
+
+  async collectBinanceAssetStatus() {
+    const byCoin = new Map();
+    const response = await fetchJson("https://www.binance.com/bapi/capital/v1/public/capital/getNetworkCoinAll");
+    (response?.data || []).forEach((coin) => {
+      const symbol = String(coin.coin || "").toUpperCase();
+      if (!symbol) return;
+      const networks = (coin.networkList || []).map((n) => ({
+        network: n.networkDisplay || n.network || "-",
+        deposit: Boolean(n.depositEnable),
+        withdraw: Boolean(n.withdrawEnable),
+      }));
+      byCoin.set(symbol, this.formatExchangeStatus("binance", networks));
+    });
+    this.setExchangeCollectorResult("binance", byCoin);
+  }
+
+  async collectBybitAssetStatus() {
+    const byCoin = new Map();
+    if (!this.env.BYBIT_API_KEY || !this.env.BYBIT_SECRET_KEY) {
+      this.setExchangeCollectorResult("bybit", byCoin);
+      return;
+    }
+
+    const ts = Date.now().toString();
+    const recvWindow = "5000";
+    const query = "";
+    const signPayload = `${ts}${this.env.BYBIT_API_KEY}${recvWindow}${query}`;
+    const sign = await hmacSha256Hex(this.env.BYBIT_SECRET_KEY, signPayload);
+    const response = await fetchJson("https://api.bybit.com/v5/asset/coin/query-info", {
+      headers: {
+        "X-BAPI-API-KEY": this.env.BYBIT_API_KEY,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": recvWindow,
+        "X-BAPI-SIGN": sign,
+      },
+    });
+
+    (response?.result?.rows || []).forEach((item) => {
+      const symbol = String(item.coin || "").toUpperCase();
+      if (!symbol) return;
+      const existing = byCoin.get(symbol)?.networks || [];
+      const depositRaw = String(item.chainDeposit || item.depositStatus || "").toLowerCase();
+      const withdrawRaw = String(item.chainWithdraw || item.withdrawStatus || "").toLowerCase();
+      existing.push({
+        network: item.chain || item.chainType || "-",
+        deposit: depositRaw === "1" || depositRaw === "true" || depositRaw === "normal",
+        withdraw: withdrawRaw === "1" || withdrawRaw === "true" || withdrawRaw === "normal",
+      });
+      byCoin.set(symbol, this.formatExchangeStatus("bybit", existing));
+    });
+
+    this.setExchangeCollectorResult("bybit", byCoin);
+  }
+
+  async collectOkxAssetStatus() {
+    const byCoin = new Map();
+    if (!this.env.OKX_API_KEY || !this.env.OKX_SECRET_KEY || !this.env.OKX_PASSPHRASE) {
+      this.setExchangeCollectorResult("okx", byCoin);
+      return;
+    }
+
+    const ts = new Date().toISOString();
+    const path = "/api/v5/asset/currencies";
+    const sign = await hmacSha256Base64(this.env.OKX_SECRET_KEY, `${ts}GET${path}`);
+    const response = await fetchJson(`https://www.okx.com${path}`, {
+      headers: {
+        "OK-ACCESS-KEY": this.env.OKX_API_KEY,
+        "OK-ACCESS-SIGN": sign,
+        "OK-ACCESS-TIMESTAMP": ts,
+        "OK-ACCESS-PASSPHRASE": this.env.OKX_PASSPHRASE,
+      },
+    });
+
+    (response?.data || []).forEach((item) => {
+      const symbol = String(item.ccy || "").toUpperCase();
+      if (!symbol) return;
+      const existing = byCoin.get(symbol)?.networks || [];
+      existing.push({
+        network: item.chain || "-",
+        deposit: String(item.canDep || "").toLowerCase() === "true",
+        withdraw: String(item.canWd || "").toLowerCase() === "true",
+      });
+      byCoin.set(symbol, this.formatExchangeStatus("okx", existing));
+    });
+
+    this.setExchangeCollectorResult("okx", byCoin);
+  }
+
+  async collectBitgetAssetStatus() {
+    const byCoin = new Map();
+    const response = await fetchJson("https://api.bitget.com/api/v2/spot/public/coins");
+    (response?.data || []).forEach((coin) => {
+      const symbol = String(coin.coin || "").toUpperCase();
+      if (!symbol) return;
+      const networks = (coin.chains || []).map((item) => ({
+        network: item.chain || "-",
+        deposit: String(item.rechargeable).toLowerCase() === "true",
+        withdraw: String(item.withdrawable).toLowerCase() === "true",
+      }));
+      byCoin.set(symbol, this.formatExchangeStatus("bitget", networks));
+    });
+    this.setExchangeCollectorResult("bitget", byCoin);
+  }
+
+  async collectGateAssetStatusByCoin(coin) {
+    const cached = this.assetGateByCoin.get(coin);
+    if (cached && Date.now() - cached.ts < COLLECTOR_INTERVAL_MS) {
+      return cached.status;
+    }
+
+    const response = await fetchJson(`https://api.gateio.ws/api/v4/wallet/currency_chains?currency=${coin}`);
+    const items = Array.isArray(response) ? response : [];
+    const status = this.formatExchangeStatus(
+      "gate",
+      items.map((item) => ({
+        network: item.chain || "-",
+        deposit: Number(item.is_deposit_disabled) === 0 && Number(item.is_disabled) === 0,
+        withdraw: Number(item.is_withdraw_disabled) === 0 && Number(item.is_disabled) === 0,
+      }))
+    );
+
+    this.assetGateByCoin.set(coin, { ts: Date.now(), status });
+    return status;
+  }
+
+  async getAssetStatusForExchange(exchange, coin) {
+    if (exchange === "gate") {
+      try {
+        const gateStatus = await this.collectGateAssetStatusByCoin(coin);
+        if (gateStatus.networks.length > 0) return gateStatus;
+        return this.unavailableExchangeStatus("gate", "NOT_LISTED");
+      } catch (_error) {
+        return this.unavailableExchangeStatus("gate", "FETCH_ERROR");
+      }
+    }
+
+    const byCoin = this.assetByExchange.get(exchange) || new Map();
+    const status = byCoin.get(coin);
+    if (status) return status;
+
+    if (exchange === "upbit" && (!this.env.UPBIT_ACCESS_KEY || !this.env.UPBIT_SECRET_KEY)) {
+      return this.unavailableExchangeStatus("upbit", "AUTH_REQUIRED");
+    }
+    if (exchange === "bybit" && (!this.env.BYBIT_API_KEY || !this.env.BYBIT_SECRET_KEY)) {
+      return this.unavailableExchangeStatus("bybit", "AUTH_REQUIRED");
+    }
+    if (exchange === "okx" && (!this.env.OKX_API_KEY || !this.env.OKX_SECRET_KEY || !this.env.OKX_PASSPHRASE)) {
+      return this.unavailableExchangeStatus("okx", "AUTH_REQUIRED");
+    }
+
+    return this.unavailableExchangeStatus(exchange, "NOT_LISTED");
   }
 
   buildRows() {
