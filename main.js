@@ -344,13 +344,8 @@ function toWsBaseFromHttpBase(httpBase) {
     return wsBase.replace(/\/$/, '');
 }
 
-const DEFAULT_WORKER_API_BASE = 'https://kimchi-kimp-worker.YOUR-SUBDOMAIN.workers.dev';
-const apiBaseOverride = normalizeHttpBase(window.KIMP_API_BASE || localStorage.getItem('KIMP_API_BASE'));
-const wsBaseOverride = normalizeWsUrl(window.KIMP_WS_BASE || localStorage.getItem('KIMP_WS_BASE'));
-const API_BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
-    ? (apiBaseOverride || window.location.origin)
-    : (apiBaseOverride || DEFAULT_WORKER_API_BASE);
-const WS_BASE = wsBaseOverride || toWsBaseFromHttpBase(API_BASE);
+const API_BASE = 'https://kimchi-kimp-worker.taeukkim9664.workers.dev';
+const WS_BASE = 'wss://kimchi-kimp-worker.taeukkim9664.workers.dev';
 
 function formatNumber(value) {
     return Math.round(value).toLocaleString('ko-KR');
@@ -582,6 +577,34 @@ function getStatusEndpointCandidates(symbol, domesticKey, foreignKey) {
     return [...new Set(candidates)];
 }
 
+function normalizeWorkerAssetStatusPayload(raw, domesticKey, foreignKey) {
+    if (!raw || typeof raw !== 'object') return raw;
+    if (raw.exchanges && !Array.isArray(raw.exchanges)) return raw;
+    const list = Array.isArray(raw.exchanges) ? raw.exchanges : [];
+    const byExchange = {};
+    list.forEach((item) => {
+        const key = String(item?.exchange || '').trim();
+        if (!key) return;
+        byExchange[key] = item;
+        const base = key.split('_')[0];
+        if (base && !byExchange[base]) byExchange[base] = item;
+    });
+
+    const domesticBase = String(domesticKey || '').split('_')[0];
+    const foreignBase = String(foreignKey || '').split('_')[0];
+    const domesticStatus = byExchange[domesticKey] || byExchange[domesticBase] || null;
+    const foreignStatus = byExchange[foreignKey] || byExchange[foreignBase] || null;
+
+    return {
+        ...raw,
+        exchanges: {
+            ...(raw.exchanges && typeof raw.exchanges === 'object' ? raw.exchanges : {}),
+            ...(domesticStatus ? { [domesticKey]: domesticStatus } : {}),
+            ...(foreignStatus ? { [foreignKey]: foreignStatus } : {}),
+        },
+    };
+}
+
 async function fetchAssetStatus(symbol, domesticKey, foreignKey) {
     const cacheKey = `${domesticKey}:${foreignKey}:${symbol}`;
     const cached = detailStatusCache.get(cacheKey);
@@ -601,7 +624,8 @@ async function fetchAssetStatus(symbol, domesticKey, foreignKey) {
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
             }
-            const serverData = await response.json();
+            const serverDataRaw = await response.json();
+            const serverData = normalizeWorkerAssetStatusPayload(serverDataRaw, domesticKey, foreignKey);
             const needsClientEnrichment = [domesticKey, foreignKey].some((exchangeKey) => {
                 const status = serverData?.exchanges?.[exchangeKey];
                 const networks = Array.isArray(status?.networks) ? status.networks : [];
