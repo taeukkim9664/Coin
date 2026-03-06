@@ -572,9 +572,24 @@ async function fetchAssetStatus(symbol, domesticKey, foreignKey) {
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
             }
-            const data = await response.json();
-            detailStatusCache.set(cacheKey, { ts: Date.now(), data });
-            return data;
+            const serverData = await response.json();
+            const needsClientEnrichment = [domesticKey, foreignKey].some((exchangeKey) => {
+                const status = serverData?.exchanges?.[exchangeKey];
+                const networks = Array.isArray(status?.networks) ? status.networks : [];
+                if (networks.length === 0) return true;
+                const hasKnownState = networks.some((n) => n?.deposit === true || n?.deposit === false || n?.withdraw === true || n?.withdraw === false);
+                return !hasKnownState;
+            });
+
+            if (!needsClientEnrichment) {
+                detailStatusCache.set(cacheKey, { ts: Date.now(), data: serverData });
+                return serverData;
+            }
+
+            const fallback = await fetchAssetStatusClientFallback(symbol, domesticKey, foreignKey);
+            const merged = mergeAssetStatusPayload(serverData, fallback, domesticKey, foreignKey);
+            detailStatusCache.set(cacheKey, { ts: Date.now(), data: merged });
+            return merged;
         } catch (error) {
             lastError = error;
         }
@@ -582,6 +597,29 @@ async function fetchAssetStatus(symbol, domesticKey, foreignKey) {
     const fallback = await fetchAssetStatusClientFallback(symbol, domesticKey, foreignKey);
     detailStatusCache.set(cacheKey, { ts: Date.now(), data: fallback });
     return fallback;
+}
+
+function mergeAssetStatusPayload(primary, fallback, domesticKey, foreignKey) {
+    const pickStatus = (primaryStatus, fallbackStatus) => {
+        const primaryNetworks = Array.isArray(primaryStatus?.networks) ? primaryStatus.networks : [];
+        const fallbackNetworks = Array.isArray(fallbackStatus?.networks) ? fallbackStatus.networks : [];
+        const primaryHasKnownState = primaryNetworks.some((n) => n?.deposit === true || n?.deposit === false || n?.withdraw === true || n?.withdraw === false);
+        const fallbackHasKnownState = fallbackNetworks.some((n) => n?.deposit === true || n?.deposit === false || n?.withdraw === true || n?.withdraw === false);
+        if (fallbackHasKnownState && !primaryHasKnownState) return fallbackStatus;
+        if (!primaryNetworks.length && fallbackNetworks.length) return fallbackStatus;
+        return primaryStatus || fallbackStatus;
+    };
+
+    return {
+        ...(primary || {}),
+        ...(fallback || {}),
+        exchanges: {
+            ...(fallback?.exchanges || {}),
+            ...(primary?.exchanges || {}),
+            [domesticKey]: pickStatus(primary?.exchanges?.[domesticKey], fallback?.exchanges?.[domesticKey]),
+            [foreignKey]: pickStatus(primary?.exchanges?.[foreignKey], fallback?.exchanges?.[foreignKey]),
+        },
+    };
 }
 
 async function fetchAssetStatusClientFallback(symbol, domesticKey, foreignKey) {
@@ -647,12 +685,31 @@ async function fetchAssetStatusClientFallback(symbol, domesticKey, foreignKey) {
                 );
             }
         } catch (_) {}
-    } else if (domesticBase === 'upbit' || domesticBase === 'gopax') {
+    } else if (domesticBase === 'gopax') {
+        try {
+            const assets = await fetchJson('https://api.gopax.co.kr/assets');
+            const listed = (Array.isArray(assets) ? assets : []).find((item) => String(item.id || '').toUpperCase() === upper);
+            if (listed) {
+                payload.exchanges[domesticKey] = withSummary(
+                    domesticKey,
+                    domesticExchangeMeta[domesticKey]?.label || domesticKey,
+                    [{ network: 'MAIN', deposit: true, withdraw: true }]
+                );
+            } else {
+                payload.exchanges[domesticKey] = {
+                    exchange: domesticKey,
+                    label: domesticExchangeMeta[domesticKey]?.label || domesticKey,
+                    summary: { deposit: null, withdraw: null },
+                    networks: [{ network: '상장 정보 없음', deposit: null, withdraw: null }],
+                };
+            }
+        } catch (_) {}
+    } else if (domesticBase === 'upbit') {
         payload.exchanges[domesticKey] = {
             exchange: domesticKey,
             label: domesticExchangeMeta[domesticKey]?.label || domesticKey,
             summary: { deposit: null, withdraw: null },
-            networks: [{ network: 'API 키 필요', deposit: null, withdraw: null }],
+            networks: [{ network: '공개 API 미지원', deposit: null, withdraw: null }],
         };
     }
 
@@ -711,7 +768,7 @@ async function fetchAssetStatusClientFallback(symbol, domesticKey, foreignKey) {
             exchange: foreignKey,
             label: globalExchangeMeta[foreignKey]?.label || foreignKey,
             summary: { deposit: null, withdraw: null },
-            networks: [{ network: 'API 키 필요', deposit: null, withdraw: null }],
+            networks: [{ network: '공개 API 미지원', deposit: null, withdraw: null }],
         };
     }
 
