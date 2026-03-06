@@ -65,6 +65,7 @@ export class KimpHub {
     this.assetCollectorsUpdatedAt = 0;
     this.assetByExchange = new Map(); // exchange -> Map(coin -> status)
     this.assetGateByCoin = new Map(); // coin -> { ts, status }
+    this.upbitPublicWalletCache = null; // { ts, byCoin: Map<string, status> }
   }
 
   async fetch(request) {
@@ -80,6 +81,12 @@ export class KimpHub {
 
       const exchanges = ["upbit", "binance", "bybit", "okx", "bitget", "gate"];
       const statuses = await Promise.all(exchanges.map((exchange) => this.getAssetStatusForExchange(exchange, coin)));
+      // Upbit: always try public wallet status endpoint first.
+      const upbitIndex = exchanges.indexOf("upbit");
+      if (upbitIndex >= 0) {
+        const upbitPublic = await this.getUpbitPublicWalletStatus(coin);
+        if (upbitPublic) statuses[upbitIndex] = upbitPublic;
+      }
 
       return jsonResponse(
         {
@@ -269,6 +276,56 @@ export class KimpHub {
         // ignore
       }
     });
+  }
+
+  mapUpbitWalletState(walletState) {
+    const state = String(walletState || "").toLowerCase();
+    if (state === "working") return { deposit: true, withdraw: true };
+    if (state === "deposit_only") return { deposit: true, withdraw: false };
+    if (state === "withdraw_only") return { deposit: false, withdraw: true };
+    if (state === "paused") return { deposit: false, withdraw: false };
+    return null;
+  }
+
+  async getUpbitPublicWalletStatus(coin) {
+    try {
+      const cache = this.upbitPublicWalletCache;
+      if (cache && Date.now() - cache.ts < COLLECTOR_INTERVAL_MS && cache.byCoin instanceof Map) {
+        return cache.byCoin.get(coin) || null;
+      }
+
+      const response = await fetchJson("https://api.upbit.com/v1/status/wallet");
+      if (!Array.isArray(response)) return null;
+
+      const byCoin = new Map();
+      for (const item of response) {
+        const symbol = String(item?.currency || "").toUpperCase();
+        if (!symbol) continue;
+        const mapped = this.mapUpbitWalletState(item?.wallet_state);
+        if (!mapped) continue;
+        const networkName = String(item?.net_type || symbol || "MAIN");
+        const normalized = {
+          exchange: "upbit",
+          deposit: mapped.deposit,
+          withdraw: mapped.withdraw,
+          deposit_enabled: mapped.deposit,
+          withdraw_enabled: mapped.withdraw,
+          networks: [
+            {
+              network: networkName,
+              deposit: mapped.deposit,
+              withdraw: mapped.withdraw,
+            },
+          ],
+        };
+        byCoin.set(symbol, normalized);
+      }
+
+      this.upbitPublicWalletCache = { ts: Date.now(), byCoin };
+      return byCoin.get(coin) || null;
+    } catch (_error) {
+      return null;
+    }
   }
 
   connectBinanceShards() {
