@@ -103,36 +103,16 @@ export class KimpHub {
 
       const exchanges = ["upbit", "binance", "bybit", "okx", "bitget", "gate"];
       const statuses = await Promise.all(exchanges.map((exchange) => this.getAssetStatusForExchange(exchange, coin)));
-      // Upbit: always use dedicated public wallet status debug fetch first.
+      // Upbit wallet status endpoint requires authenticated JWT; do not call it from public worker.
       const upbitIndex = exchanges.indexOf("upbit");
       if (upbitIndex >= 0) {
-        const upbitDebug = await this.getUpbitAssetStatus(coin);
-        if (upbitDebug.parsed && upbitDebug.normalizedResult) {
-          statuses[upbitIndex] = upbitDebug.normalizedResult;
-        } else {
-          const lastAttempt = upbitDebug.attempts[upbitDebug.attempts.length - 1] || null;
-          const reason = lastAttempt?.error || "UPBIT_WALLET_STATUS_FETCH_FAILED";
-          statuses[upbitIndex] = {
-            exchange: "upbit",
-            deposit: null,
-            withdraw: null,
-            deposit_enabled: null,
-            withdraw_enabled: null,
-            networks: [],
-            error: reason,
-            debug: lastAttempt
-              ? {
-                  requestUrl: lastAttempt.requestUrl,
-                  httpStatus: lastAttempt.httpStatus,
-                  contentType: lastAttempt.contentType,
-                  responsePreview: lastAttempt.responsePreview,
-                  jsonParsed: lastAttempt.jsonParsed,
-                  arrayLength: lastAttempt.arrayLength,
-                  matchCount: lastAttempt.matchCount,
-                }
-              : null,
-          };
-        }
+        statuses[upbitIndex] = {
+          exchange: "upbit",
+          deposit: null,
+          withdraw: null,
+          networks: [],
+          error: "Upbit wallet API requires authentication",
+        };
       }
 
       return jsonResponse(
@@ -325,173 +305,16 @@ export class KimpHub {
     });
   }
 
-  mapUpbitWalletState(walletState) {
-    const state = String(walletState || "").toLowerCase();
-    if (state === "working") return { deposit: true, withdraw: true };
-    if (state === "deposit_only") return { deposit: true, withdraw: false };
-    if (state === "withdraw_only") return { deposit: false, withdraw: true };
-    if (state === "paused") return { deposit: false, withdraw: false };
-    return null;
-  }
-
   async getUpbitAssetStatus(coin) {
-    const attempts = [];
     const upperCoin = String(coin || "").toUpperCase();
-    try {
-      const cache = this.upbitPublicWalletCache;
-      if (cache && Date.now() - cache.ts < COLLECTOR_INTERVAL_MS && cache.byCoin instanceof Map) {
-        const cached = cache.byCoin.get(upperCoin) || {
-          exchange: "upbit",
-          deposit: false,
-          withdraw: false,
-          deposit_enabled: false,
-          withdraw_enabled: false,
-          networks: [],
-        };
-        return {
-          coin: upperCoin,
-          attempts,
-          parsed: true,
-          matchedCount: Array.isArray(cached.networks) ? cached.networks.length : 0,
-          normalizedResult: cached,
-        };
-      }
-
-      const urls = [
-        "https://kr-api.upbit.com/v1/status/wallet",
-        "https://sg-api.upbit.com/v1/status/wallet",
-        "https://id-api.upbit.com/v1/status/wallet",
-        "https://th-api.upbit.com/v1/status/wallet",
-      ];
-
-      for (const requestUrl of urls) {
-        const attempt = {
-          requestUrl,
-          httpStatus: null,
-          contentType: null,
-          responsePreview: "",
-          jsonParsed: false,
-          arrayLength: null,
-          matchCount: 0,
-          error: null,
-        };
-        console.log(`[asset-status][upbit] request url=${requestUrl}`);
-        try {
-          const response = await fetch(requestUrl, {
-            headers: {
-              "user-agent": "kimchi-kimp-worker/1.0",
-            },
-          });
-          attempt.httpStatus = response.status;
-          attempt.contentType = response.headers.get("content-type") || "";
-          const rawText = await response.text();
-          attempt.responsePreview = String(rawText || "").slice(0, 300);
-          console.log(`[asset-status][upbit] status=${attempt.httpStatus} url=${requestUrl}`);
-
-          if (!response.ok) {
-            attempt.error = `HTTP_${response.status}`;
-            attempts.push(attempt);
-            continue;
-          }
-
-          let payload = null;
-          try {
-            payload = JSON.parse(rawText);
-            attempt.jsonParsed = true;
-          } catch (parseError) {
-            attempt.error = `JSON_PARSE_FAILED: ${String(parseError?.message || parseError)}`;
-            attempts.push(attempt);
-            continue;
-          }
-
-          if (!Array.isArray(payload)) {
-            attempt.error = "RESPONSE_NOT_ARRAY";
-            attempts.push(attempt);
-            continue;
-          }
-
-          attempt.arrayLength = payload.length;
-          const byCoinNetworks = new Map();
-          for (const item of payload) {
-            const symbol = String(item?.currency || "").toUpperCase();
-            if (!symbol) continue;
-            const mapped = this.mapUpbitWalletState(item?.wallet_state);
-            if (!mapped) continue;
-            const networkName = String(item?.net_type || item?.network_name || item?.currency || "MAIN");
-            if (!byCoinNetworks.has(symbol)) byCoinNetworks.set(symbol, []);
-            byCoinNetworks.get(symbol).push({
-              network: networkName,
-              deposit: mapped.deposit,
-              withdraw: mapped.withdraw,
-            });
-          }
-
-          const byCoin = new Map();
-          for (const [symbol, networks] of byCoinNetworks.entries()) {
-            const deposit = networks.some((n) => n.deposit === true);
-            const withdraw = networks.some((n) => n.withdraw === true);
-            byCoin.set(symbol, {
-              exchange: "upbit",
-              deposit,
-              withdraw,
-              deposit_enabled: deposit,
-              withdraw_enabled: withdraw,
-              networks,
-            });
-          }
-
-          const matched = byCoin.get(upperCoin) || {
-            exchange: "upbit",
-            deposit: false,
-            withdraw: false,
-            deposit_enabled: false,
-            withdraw_enabled: false,
-            networks: [],
-          };
-          attempt.matchCount = Array.isArray(matched.networks) ? matched.networks.length : 0;
-          console.log(`[asset-status][upbit] coin=${upperCoin} matching_networks=${attempt.matchCount}`);
-          attempts.push(attempt);
-          this.upbitPublicWalletCache = { ts: Date.now(), byCoin };
-          return {
-            coin: upperCoin,
-            attempts,
-            parsed: true,
-            matchedCount: attempt.matchCount,
-            normalizedResult: matched,
-          };
-        } catch (requestError) {
-          attempt.error = `REQUEST_FAILED: ${String(requestError?.message || requestError)}`;
-          attempts.push(attempt);
-          continue;
-        }
-      }
-
-      return {
-        coin: upperCoin,
-        attempts,
-        parsed: false,
-        matchedCount: 0,
-        normalizedResult: null,
-      };
-    } catch (error) {
-      attempts.push({
-        requestUrl: null,
-        httpStatus: null,
-        contentType: null,
-        responsePreview: "",
-        jsonParsed: false,
-        arrayLength: null,
-        matchCount: 0,
-        error: `UNEXPECTED: ${String(error?.message || error)}`,
-      });
-      return {
-        coin: upperCoin,
-        attempts,
-        parsed: false,
-        matchedCount: 0,
-        normalizedResult: null,
-      };
-    }
+    return {
+      coin: upperCoin,
+      attempts: [],
+      parsed: false,
+      matchedCount: 0,
+      normalizedResult: null,
+      error: "Upbit wallet API requires authentication",
+    };
   }
 
   connectBinanceShards() {
