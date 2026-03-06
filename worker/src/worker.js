@@ -287,6 +287,15 @@ export class KimpHub {
     return null;
   }
 
+  getUpbitWalletStatusUrls() {
+    const rawRegion = String(this.env.UPBIT_REGION || "").trim().toLowerCase();
+    const regions = rawRegion ? [rawRegion] : ["sg", "id", "th"];
+    const urls = regions
+      .filter(Boolean)
+      .map((region) => `https://${region}-api.upbit.com/v1/status/wallet`);
+    return [...new Set(urls)];
+  }
+
   async getUpbitPublicWalletStatus(coin) {
     try {
       const cache = this.upbitPublicWalletCache;
@@ -294,37 +303,79 @@ export class KimpHub {
         return cache.byCoin.get(coin) || null;
       }
 
-      const response = await fetchJson("https://api.upbit.com/v1/status/wallet");
-      if (!Array.isArray(response)) return null;
+      const urls = this.getUpbitWalletStatusUrls();
+      for (const url of urls) {
+        console.log(`[asset-status][upbit] request url=${url}`);
+        const response = await fetch(url, {
+          headers: {
+            "user-agent": "kimchi-kimp-worker/1.0",
+          },
+        });
+        console.log(`[asset-status][upbit] status=${response.status} url=${url}`);
+        if (!response.ok) continue;
 
-      const byCoin = new Map();
-      for (const item of response) {
-        const symbol = String(item?.currency || "").toUpperCase();
-        if (!symbol) continue;
-        const mapped = this.mapUpbitWalletState(item?.wallet_state);
-        if (!mapped) continue;
-        const networkName = String(item?.net_type || symbol || "MAIN");
-        const normalized = {
+        const payload = await response.json().catch(() => null);
+        if (!Array.isArray(payload)) continue;
+
+        const byCoinNetworks = new Map();
+        for (const item of payload) {
+          const symbol = String(item?.currency || "").toUpperCase();
+          if (!symbol) continue;
+          const mapped = this.mapUpbitWalletState(item?.wallet_state);
+          if (!mapped) continue;
+          const networkName = String(item?.network_name || item?.net_type || symbol || "MAIN");
+          if (!byCoinNetworks.has(symbol)) byCoinNetworks.set(symbol, []);
+          byCoinNetworks.get(symbol).push({
+            network: networkName,
+            deposit: mapped.deposit,
+            withdraw: mapped.withdraw,
+          });
+        }
+
+        const byCoin = new Map();
+        for (const [symbol, networks] of byCoinNetworks.entries()) {
+          const deposit = networks.some((n) => n.deposit === true);
+          const withdraw = networks.some((n) => n.withdraw === true);
+          byCoin.set(symbol, {
+            exchange: "upbit",
+            deposit,
+            withdraw,
+            deposit_enabled: deposit,
+            withdraw_enabled: withdraw,
+            networks,
+          });
+        }
+
+        const matched = byCoin.get(coin);
+        console.log(`[asset-status][upbit] coin=${coin} matching_networks=${matched?.networks?.length || 0}`);
+        this.upbitPublicWalletCache = { ts: Date.now(), byCoin };
+        return matched || {
           exchange: "upbit",
-          deposit: mapped.deposit,
-          withdraw: mapped.withdraw,
-          deposit_enabled: mapped.deposit,
-          withdraw_enabled: mapped.withdraw,
-          networks: [
-            {
-              network: networkName,
-              deposit: mapped.deposit,
-              withdraw: mapped.withdraw,
-            },
-          ],
+          deposit: false,
+          withdraw: false,
+          deposit_enabled: false,
+          withdraw_enabled: false,
+          networks: [],
         };
-        byCoin.set(symbol, normalized);
       }
 
-      this.upbitPublicWalletCache = { ts: Date.now(), byCoin };
-      return byCoin.get(coin) || null;
+      return {
+        exchange: "upbit",
+        deposit: false,
+        withdraw: false,
+        deposit_enabled: false,
+        withdraw_enabled: false,
+        networks: [],
+      };
     } catch (_error) {
-      return null;
+      return {
+        exchange: "upbit",
+        deposit: false,
+        withdraw: false,
+        deposit_enabled: false,
+        withdraw_enabled: false,
+        networks: [],
+      };
     }
   }
 
