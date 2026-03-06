@@ -103,16 +103,21 @@ export class KimpHub {
 
       const exchanges = ["upbit", "binance", "bybit", "okx", "bitget", "gate"];
       const statuses = await Promise.all(exchanges.map((exchange) => this.getAssetStatusForExchange(exchange, coin)));
-      // Upbit wallet status endpoint requires authenticated JWT; do not call it from public worker.
+      // Upbit: use notice/announcement scraping source.
       const upbitIndex = exchanges.indexOf("upbit");
       if (upbitIndex >= 0) {
-        statuses[upbitIndex] = {
-          exchange: "upbit",
-          deposit: null,
-          withdraw: null,
-          networks: [],
-          error: "Upbit wallet API requires authentication",
-        };
+        const upbit = await this.getUpbitAssetStatus(coin);
+        if (upbit?.normalizedResult) {
+          statuses[upbitIndex] = upbit.normalizedResult;
+        } else {
+          statuses[upbitIndex] = {
+            exchange: "upbit",
+            deposit: null,
+            withdraw: null,
+            networks: [],
+            error: upbit?.error || "Unable to parse Upbit notices",
+          };
+        }
       }
 
       return jsonResponse(
@@ -307,14 +312,130 @@ export class KimpHub {
 
   async getUpbitAssetStatus(coin) {
     const upperCoin = String(coin || "").toUpperCase();
-    return {
-      coin: upperCoin,
-      attempts: [],
-      parsed: false,
-      matchedCount: 0,
-      normalizedResult: null,
-      error: "Upbit wallet API requires authentication",
-    };
+    const attempts = [];
+    try {
+      const cache = this.upbitPublicWalletCache;
+      if (cache && Date.now() - cache.ts < COLLECTOR_INTERVAL_MS && cache.byCoin instanceof Map) {
+        const cached = cache.byCoin.get(upperCoin) || null;
+        return {
+          coin: upperCoin,
+          attempts: cache.attempts || [],
+          parsed: true,
+          matchedCount: cached?.networks?.length || 0,
+          normalizedResult: cached,
+          error: cached ? null : "No matching Upbit notice for coin",
+        };
+      }
+
+      const listUrl = "https://global-docs.upbit.com/changelog";
+      const listResponse = await fetch(listUrl, { headers: { "user-agent": "kimchi-kimp-worker/1.0" } });
+      const listText = await listResponse.text();
+      attempts.push({
+        step: "changelog_list",
+        url: listUrl,
+        status: listResponse.status,
+        ok: listResponse.ok,
+        preview: String(listText || "").slice(0, 200),
+      });
+      if (!listResponse.ok) {
+        return {
+          coin: upperCoin,
+          attempts,
+          parsed: false,
+          matchedCount: 0,
+          normalizedResult: null,
+          error: `Upbit notice list fetch failed: HTTP_${listResponse.status}`,
+        };
+      }
+
+      const linkMatches = Array.from(String(listText).matchAll(/href="(\/changelog\/[^"]+)"/g))
+        .map((m) => m[1])
+        .filter(Boolean);
+      const links = [...new Set(linkMatches)].slice(0, 40).map((path) => `https://global-docs.upbit.com${path}`);
+
+      const notices = [];
+      for (const url of links) {
+        try {
+          const response = await fetch(url, { headers: { "user-agent": "kimchi-kimp-worker/1.0" } });
+          const html = await response.text();
+          attempts.push({ step: "notice_detail", url, status: response.status, ok: response.ok });
+          if (!response.ok) continue;
+
+          const titleMatch = html.match(/<title>(.*?)<\/title>/i);
+          const metaMatch = html.match(/<meta\s+name="description"\s+content="([^"]*)"/i);
+          const title = decodeHtmlEntities(titleMatch?.[1] || "");
+          const description = decodeHtmlEntities(metaMatch?.[1] || "");
+          const text = `${title}\n${description}\n${stripHtmlText(html)}`.replace(/\s+/g, " ").trim();
+          notices.push({ url, text });
+        } catch (error) {
+          attempts.push({
+            step: "notice_detail",
+            url,
+            ok: false,
+            error: String(error?.message || error),
+          });
+        }
+      }
+
+      const networksMap = new Map();
+      let matchedCount = 0;
+      for (const notice of notices) {
+        const parsed = parseUpbitNoticeForCoin(notice.text, upperCoin);
+        if (!parsed) continue;
+        matchedCount += 1;
+        const key = parsed.network;
+        const existing = networksMap.get(key) || { network: key, deposit: null, withdraw: null };
+        if (parsed.deposit !== null) existing.deposit = parsed.deposit;
+        if (parsed.withdraw !== null) existing.withdraw = parsed.withdraw;
+        networksMap.set(key, existing);
+      }
+
+      const networks = Array.from(networksMap.values())
+        .filter((n) => n.deposit !== null || n.withdraw !== null)
+        .map((n) => ({
+          network: n.network,
+          deposit: n.deposit === true,
+          withdraw: n.withdraw === true,
+        }));
+
+      const normalizedResult = networks.length
+        ? {
+            exchange: "upbit",
+            deposit: networks.some((n) => n.deposit === true),
+            withdraw: networks.some((n) => n.withdraw === true),
+            deposit_enabled: networks.some((n) => n.deposit === true),
+            withdraw_enabled: networks.some((n) => n.withdraw === true),
+            networks,
+          }
+        : null;
+
+      const byCoin = new Map();
+      if (normalizedResult) byCoin.set(upperCoin, normalizedResult);
+      this.upbitPublicWalletCache = {
+        ts: Date.now(),
+        byCoin,
+        attempts,
+      };
+
+      return {
+        coin: upperCoin,
+        attempts,
+        parsed: true,
+        matchedCount,
+        normalizedResult,
+        error: normalizedResult ? null : "No matching Upbit notice for coin",
+      };
+    } catch (error) {
+      attempts.push({ step: "upbit_notice_parse", ok: false, error: String(error?.message || error) });
+      return {
+        coin: upperCoin,
+        attempts,
+        parsed: false,
+        matchedCount: 0,
+        normalizedResult: null,
+        error: String(error?.message || error),
+      };
+    }
   }
 
   connectBinanceShards() {
@@ -687,6 +808,55 @@ function chunk(arr, size) {
     out.push(arr.slice(i, i + size));
   }
   return out;
+}
+
+function decodeHtmlEntities(input) {
+  return String(input || "")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function stripHtmlText(html) {
+  return String(html || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseUpbitNoticeForCoin(text, coin) {
+  const raw = String(text || "");
+  if (!raw) return null;
+  const upper = raw.toUpperCase();
+  const symbol = String(coin || "").toUpperCase();
+  const coinRegex = new RegExp(`(^|[^A-Z0-9])${symbol}([^A-Z0-9]|$)`);
+  if (!coinRegex.test(upper)) return null;
+
+  const mentionsDeposit = /\bDEPOSIT(S)?\b/i.test(raw);
+  const mentionsWithdraw = /\bWITHDRAW(AL|ALS)?\b/i.test(raw);
+  const mentionsBoth = /\bDEPOSIT(?:S)?\s*(?:AND|\/|&)\s*WITHDRAW(?:AL|ALS)?\b/i.test(raw);
+  const hasActionWord = /(SUSPEND|SUSPENSION|PAUSE|PAUSED|MAINTENANCE|RESUME|RESUMED|REOPEN|REOPENED|RESTORED|NORMALIZED)/i.test(raw);
+  if (!hasActionWord || (!mentionsDeposit && !mentionsWithdraw && !mentionsBoth)) return null;
+
+  const lowered = raw.toLowerCase();
+  const suspendIdx = lowered.search(/suspend|suspension|pause|paused|maintenance|halt|disable|unavailable/);
+  const resumeIdx = lowered.search(/resume|resumed|reopen|reopened|restored|normaliz/);
+  let state = null;
+  if (suspendIdx >= 0 && resumeIdx >= 0) state = resumeIdx > suspendIdx ? true : false;
+  else if (resumeIdx >= 0) state = true;
+  else if (suspendIdx >= 0) state = false;
+  if (state === null) return null;
+
+  const networkMatch = raw.match(/\b(ERC20|TRC20|BEP20|KIP7|SPL|ETH|XRP|BTC|SOL|ARB|OPTIMISM|OP|BASE|POLYGON|MATIC|AVAX|TON|APTOS|SUI|NEAR|OMNI)\b/i);
+  const network = String(networkMatch?.[1] || symbol).toUpperCase();
+
+  const deposit = (mentionsDeposit || mentionsBoth) ? state : null;
+  const withdraw = (mentionsWithdraw || mentionsBoth) ? state : null;
+  return { network, deposit, withdraw };
 }
 
 async function decodeWsMessage(data) {
