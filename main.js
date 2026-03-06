@@ -272,16 +272,19 @@ let liveRefreshMs = DEFAULT_REFRESH_MS;
 let consecutiveLoadFailures = 0;
 let hasSuccessfulRender = false;
 const PRESET_WS_URL = normalizeWsUrl(window.KIMP_WS_URL || localStorage.getItem('KIMP_WS_URL'));
-const USE_DO_STREAM = Boolean(PRESET_WS_URL);
+const DO_DISABLED = String(window.KIMP_DISABLE_DO || localStorage.getItem('KIMP_DISABLE_DO') || '').trim() === '1';
+const USE_DO_STREAM = !DO_DISABLED;
 let doEnabled = USE_DO_STREAM;
 let doSocket = null;
 let doReconnectDelayMs = 1000;
 let doLastRenderAt = 0;
+let doLastSnapshotAt = 0;
 let doPendingSnapshot = null;
 let doRenderTimer = null;
 let doConnectFailures = 0;
 let doConnectedOnce = false;
 const DO_MAX_FAIL_BEFORE_FALLBACK = 3;
+const DO_SNAPSHOT_GRACE_MS = 3000;
 const DETAIL_INTERVALS = [
     { label: '1분', value: '1' },
     { label: '5분', value: '5' },
@@ -1712,7 +1715,12 @@ async function loadMarketRows(options = {}) {
 async function refreshMarketRows(silent = true) {
     if (isRefreshing) return;
     if (tableState.selectedSymbol) return;
-    if (!doEnabled && tableState.rows.length > 0 && Date.now() - lastRestFetchAt < REST_FETCH_MIN_MS) {
+    const doPreferred = doEnabled && isDoPreferredPair();
+    const hasFreshDoSnapshot = Date.now() - doLastSnapshotAt < DO_SNAPSHOT_GRACE_MS;
+    if (doPreferred && hasFreshDoSnapshot) {
+        return;
+    }
+    if (tableState.rows.length > 0 && Date.now() - lastRestFetchAt < REST_FETCH_MIN_MS) {
         return;
     }
     isRefreshing = true;
@@ -1742,6 +1750,10 @@ function getDoWsUrl() {
     if (explicit) return explicit;
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     return `${proto}//${window.location.host}/ws`;
+}
+
+function isDoPreferredPair() {
+    return domesticExchangeSelect.value === 'upbit' && globalExchangeSelect.value === 'binance';
 }
 
 function switchToRestFallback(reason = '') {
@@ -1776,6 +1788,8 @@ function mapDoRowsToTableRows(doRows) {
 }
 
 function applyDoSnapshot(snapshot) {
+    if (!isDoPreferredPair()) return;
+    doLastSnapshotAt = Date.now();
     const rows = mapDoRowsToTableRows(snapshot.rows);
     tableState.rows = rows;
     const domestic = domesticExchangeMeta[domesticExchangeSelect.value]?.label || '업비트';
@@ -1820,6 +1834,7 @@ function scheduleDoSnapshot(snapshot) {
 
 function sendDoSubscribe() {
     if (!doSocket || doSocket.readyState !== WebSocket.OPEN) return;
+    if (!isDoPreferredPair()) return;
     doSocket.send(JSON.stringify({
         type: 'subscribe',
         domestic: domesticExchangeSelect.value,
@@ -1906,23 +1921,21 @@ sortableHeaders.forEach((header) => {
 
 domesticExchangeSelect.addEventListener('change', () => {
     detailStatusCache.clear();
-    if (doEnabled) {
+    if (doEnabled && isDoPreferredPair()) {
         sendDoSubscribe();
-    } else {
-        refreshMarketRows(false);
     }
+    refreshMarketRows(false);
 });
 globalExchangeSelect.addEventListener('change', () => {
     detailStatusCache.clear();
-    if (doEnabled) {
+    if (doEnabled && isDoPreferredPair()) {
         sendDoSubscribe();
-    } else {
-        refreshMarketRows(false);
     }
+    refreshMarketRows(false);
 });
 globalExchangeSelect.addEventListener('change', loadChart);
 refreshIntervalSelect.addEventListener('change', () => {
-    if (doEnabled) {
+    if (doEnabled && isDoPreferredPair()) {
         if (doPendingSnapshot) {
             flushDoSnapshot();
         }
@@ -1969,25 +1982,22 @@ document.addEventListener('click', () => {
 loadChart();
 initExchangeSelectLogos();
 hydrateRowsFromCache();
+liveRefreshMs = Number(refreshIntervalSelect.value) || DEFAULT_REFRESH_MS;
+startLiveRefresh();
 if (doEnabled) {
-    setLoadingRow('실시간 허브에 연결 중...');
     connectDoStream();
-} else {
-    liveRefreshMs = Number(refreshIntervalSelect.value) || DEFAULT_REFRESH_MS;
-    startLiveRefresh();
 }
 
 document.addEventListener('visibilitychange', () => {
     if (doEnabled) {
         if (!document.hidden) {
             connectDoStream();
-            sendDoSubscribe();
         }
-    } else {
-        if (document.hidden) {
-            stopLiveRefresh();
-            return;
-        }
-        startLiveRefresh();
+        if (isDoPreferredPair()) sendDoSubscribe();
     }
+    if (document.hidden) {
+        stopLiveRefresh();
+        return;
+    }
+    startLiveRefresh();
 });
