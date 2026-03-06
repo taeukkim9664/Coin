@@ -321,6 +321,37 @@ function normalizeWsUrl(raw) {
     }
 }
 
+function normalizeHttpBase(raw) {
+    if (!raw) return '';
+    const value = String(raw).trim();
+    if (!value) return '';
+    try {
+        const url = new URL(value, window.location.href);
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+        url.pathname = '';
+        url.search = '';
+        url.hash = '';
+        return url.toString().replace(/\/$/, '');
+    } catch (_error) {
+        return '';
+    }
+}
+
+function toWsBaseFromHttpBase(httpBase) {
+    const normalizedHttp = normalizeHttpBase(httpBase);
+    if (!normalizedHttp) return '';
+    const wsBase = normalizedHttp.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:');
+    return wsBase.replace(/\/$/, '');
+}
+
+const DEFAULT_WORKER_API_BASE = 'https://kimchi-kimp-worker.YOUR-SUBDOMAIN.workers.dev';
+const apiBaseOverride = normalizeHttpBase(window.KIMP_API_BASE || localStorage.getItem('KIMP_API_BASE'));
+const wsBaseOverride = normalizeWsUrl(window.KIMP_WS_BASE || localStorage.getItem('KIMP_WS_BASE'));
+const API_BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+    ? (apiBaseOverride || window.location.origin)
+    : (apiBaseOverride || DEFAULT_WORKER_API_BASE);
+const WS_BASE = wsBaseOverride || toWsBaseFromHttpBase(API_BASE);
+
 function formatNumber(value) {
     return Math.round(value).toLocaleString('ko-KR');
 }
@@ -507,10 +538,8 @@ function getStatusToneClass(value) {
 
 function getStatusEndpointUrl(symbol, domesticKey, foreignKey) {
     const explicit = String(window.KIMP_STATUS_URL || localStorage.getItem('KIMP_STATUS_URL') || '').trim();
-    let base = explicit || '/asset-status';
-    if (!/^https?:\/\//i.test(base)) {
-        base = new URL(base, window.location.origin).toString();
-    }
+    let base = explicit || `${API_BASE}/asset-status`;
+    if (!/^https?:\/\//i.test(base)) base = `${API_BASE}${base.startsWith('/') ? '' : '/'}${base}`;
     const url = new URL(base);
     url.searchParams.set('symbol', symbol);
     url.searchParams.set('domestic', domesticKey);
@@ -533,7 +562,7 @@ function getStatusEndpointCandidates(symbol, domesticKey, foreignKey) {
         }
     }
 
-    const wsUrl = normalizeWsUrl(window.KIMP_WS_URL || localStorage.getItem('KIMP_WS_URL'));
+    const wsUrl = normalizeWsUrl(window.KIMP_WS_URL || localStorage.getItem('KIMP_WS_URL') || `${WS_BASE}/ws`);
     if (wsUrl) {
         try {
             const ws = new URL(wsUrl);
@@ -1805,8 +1834,7 @@ function startLiveRefresh() {
 function getDoWsUrl() {
     const explicit = normalizeWsUrl(PRESET_WS_URL || window.KIMP_WS_URL || localStorage.getItem('KIMP_WS_URL'));
     if (explicit) return explicit;
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${proto}//${window.location.host}/ws`;
+    return `${WS_BASE}/ws`;
 }
 
 function isDoPreferredPair() {
