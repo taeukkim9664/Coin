@@ -1474,14 +1474,17 @@ function renderRows() {
 
 function renderExchangeStatusBlock(status) {
     const exchangeName = status?.label || status?.exchange || '-';
-    const summaryDeposit = status?.summary?.deposit;
-    const summaryWithdraw = status?.summary?.withdraw;
+    const summaryDeposit = status?.summary?.deposit ?? status?.deposit ?? status?.deposit_enabled;
+    const summaryWithdraw = status?.summary?.withdraw ?? status?.withdraw ?? status?.withdraw_enabled;
     const networks = Array.isArray(status?.networks) ? status.networks : [];
+    const errorText = String(status?.error || '').trim();
     const exchangeKey = String(status?.exchange || exchangeName).toLowerCase();
     const logoCandidates = getExchangeLogoCandidates(exchangeKey);
     const logoSrc = logoCandidates[0] || '';
     const logoFallback = getExchangeBadgeText(exchangeKey);
-    const networkItems = networks.length
+    const networkItems = errorText
+        ? `<div class="network-empty">${errorText}</div>`
+        : networks.length
         ? networks.map((network) => `
             <div class="network-item">
                 <span class="network-name">${network.network || '-'}</span>
