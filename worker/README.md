@@ -40,6 +40,19 @@ Client -> server (`type: subscribe`) optional:
 3. Bind route/domain so frontend can access `/ws` on same origin.
    - Or set `window.KIMP_WS_URL` (or localStorage `KIMP_WS_URL`) in frontend to explicit WS URL.
 
+## Wallet Status Sources
+- Frontend should call only `/asset-status`.
+- Worker runs collectors and caches wallet status for about 5 minutes.
+- Upbit collector uses `/v1/deposits/chance/coin` per currency (JWT signed with query_hash).
+- Public sources:
+  - Binance, Bitget, Gate, Bithumb, Coinone
+- API-key required sources:
+  - Upbit (`UPBIT_ACCESS_KEY`, `UPBIT_SECRET_KEY`)
+  - OKX (`OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHRASE`)
+  - Bybit (`BYBIT_API_KEY`, `BYBIT_SECRET_KEY`)
+
+If keys are missing for private endpoints, response returns `AUTH_REQUIRED` network marker.
+
 ## Notes
 - This is a production-oriented skeleton, not final hardened code.
 - Add auth/rate-limit/observability before public launch.

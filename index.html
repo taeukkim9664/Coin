@@ -85,12 +85,16 @@
                     <div class="exchange-select-group">
                         <label for="global-exchange">해외 거래소</label>
                         <select id="global-exchange">
-                            <option value="binance" selected>바이낸스</option>
-                            <option value="bybit">바이빗</option>
-                            <option value="okx">OKX</option>
-                            <option value="mexc">MEXC</option>
-                            <option value="bitget">Bitget</option>
-                            <option value="gate">gate</option>
+                            <option value="binance" selected>바이낸스 USDT</option>
+                            <option value="binance_perp">바이낸스 USDT-PERP</option>
+                            <option value="bybit">바이빗 USDT</option>
+                            <option value="bybit_perp">바이빗 USDT-PERP</option>
+                            <option value="okx">OKX USDT</option>
+                            <option value="okx_perp">OKX USDT-PERP</option>
+                            <option value="bitget">Bitget USDT</option>
+                            <option value="bitget_perp">Bitget USDT-PERP</option>
+                            <option value="gate">gate USDT</option>
+                            <option value="gate_perp">gate USDT-PERP</option>
                         </select>
                     </div>
                     <div class="exchange-select-group">
@@ -105,7 +109,7 @@
                         </select>
                     </div>
                 </div>
-                <p id="selected-exchange-pair" class="selected-exchange-pair">업비트 vs 바이낸스</p>
+                <p id="selected-exchange-pair" class="selected-exchange-pair">업비트 / 바이낸스</p>
                 <table>
                     <thead>
                         <tr>
@@ -122,7 +126,7 @@
                 </table>
             </section>
             <section id="pair-chart-section" class="pair-chart-section">
-                <h3 id="pair-chart-title">종목 비교 차트 (업비트 vs 바이낸스)</h3>
+                <h3 id="pair-chart-title">종목 비교 차트</h3>
                 <p id="pair-chart-symbol">종목을 클릭하면 비교 차트가 표시됩니다.</p>
                 <div class="pair-chart-grid">
                     <div class="pair-chart-box">

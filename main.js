@@ -13,16 +13,20 @@ let tradingViewWidget = null;
 let chartRenderToken = 0;
 let pairChartRenderToken = 0;
 const chartState = {
-    symbol: 'BTC',
+    symbol: 'USDT',
 };
 
 const tradingViewExchangeMap = {
     binance: 'BINANCE',
+    binance_perp: 'BINANCE',
     bybit: 'BYBIT',
+    bybit_perp: 'BYBIT',
     okx: 'OKX',
-    mexc: 'MEXC',
+    okx_perp: 'OKX',
     bitget: 'BITGET',
+    bitget_perp: 'BITGET',
     gate: 'GATEIO',
+    gate_perp: 'GATEIO',
 };
 
 const symbolUniverse = [
@@ -75,7 +79,9 @@ async function loadChart() {
     const token = ++chartRenderToken;
     const selectedGlobal = globalExchangeSelect?.value || 'binance';
     const exchangePrefix = tradingViewExchangeMap[selectedGlobal] || 'BINANCE';
-    const tvSymbol = `${exchangePrefix}:${chartState.symbol}USDT`;
+    const tvSymbol = chartState.symbol === 'USDT'
+        ? 'UPBIT:USDTKRW'
+        : `${exchangePrefix}:${chartState.symbol}USDT`;
     chartContainer.innerHTML = '<div style="padding:12px;color:#a0a0a0;">차트 로딩 중...</div>';
 
     try {
@@ -103,7 +109,9 @@ async function loadChart() {
     } catch (error) {
         if (token !== chartRenderToken) return;
         if (exchangePrefix !== 'BINANCE') {
-            const fallbackSymbol = `BINANCE:${chartState.symbol}USDT`;
+            const fallbackSymbol = chartState.symbol === 'USDT'
+                ? 'UPBIT:USDTKRW'
+                : `BINANCE:${chartState.symbol}USDT`;
             try {
                 chartContainer.innerHTML = '';
                 tradingViewWidget = new window.TradingView.widget({
@@ -231,12 +239,16 @@ const domesticExchangeMeta = {
 };
 
 const globalExchangeMeta = {
-    binance: { label: '바이낸스' },
-    bybit: { label: '바이빗' },
-    okx: { label: 'OKX' },
-    mexc: { label: 'MEXC' },
-    bitget: { label: 'Bitget' },
-    gate: { label: 'gate' },
+    binance: { label: '바이낸스 USDT' },
+    binance_perp: { label: '바이낸스 USDT-PERP' },
+    bybit: { label: '바이빗 USDT' },
+    bybit_perp: { label: '바이빗 USDT-PERP' },
+    okx: { label: 'OKX USDT' },
+    okx_perp: { label: 'OKX USDT-PERP' },
+    bitget: { label: 'Bitget USDT' },
+    bitget_perp: { label: 'Bitget USDT-PERP' },
+    gate: { label: 'gate USDT' },
+    gate_perp: { label: 'gate USDT-PERP' },
 };
 
 const tableState = {
@@ -245,6 +257,7 @@ const tableState = {
     sortDirection: 'desc',
     selectedSymbol: null,
     globalExchangeLabel: '바이낸스',
+    detailInterval: '60',
 };
 let latestRequestId = 0;
 let cachedSymbolNames = null;
@@ -269,6 +282,26 @@ let doRenderTimer = null;
 let doConnectFailures = 0;
 let doConnectedOnce = false;
 const DO_MAX_FAIL_BEFORE_FALLBACK = 3;
+const DETAIL_INTERVALS = [
+    { label: '1분', value: '1' },
+    { label: '5분', value: '5' },
+    { label: '30분', value: '30' },
+    { label: '1시간', value: '60' },
+    { label: '1일', value: '1D' },
+];
+const DETAIL_STATUS_TTL_MS = 5 * 60 * 1000;
+const DETAIL_STATUS_EMPTY_TTL_MS = 15 * 1000;
+const detailStatusCache = new Map();
+const ROW_CACHE_KEY = 'kimp_rows_cache_v1';
+let lastUsdKrwRate = 1400;
+const REST_FETCH_MIN_MS = 1000;
+const DOMESTIC_CACHE_TTL_MS = 900;
+const GLOBAL_CACHE_TTL_MS = 900;
+const RATE_CACHE_TTL_MS = 10000;
+const domesticTickerCache = new Map();
+const globalTickerCache = new Map();
+let rateCache = { ts: 0, value: 1400 };
+let lastRestFetchAt = 0;
 
 function normalizeWsUrl(raw) {
     if (!raw) return '';
@@ -305,11 +338,435 @@ function formatRawQuote(value) {
     return value.toLocaleString('en-US', { maximumFractionDigits: 6 });
 }
 
+function getCoinLogoUrl(symbol) {
+    const upper = String(symbol || '').toUpperCase();
+    if (!upper) return '';
+    return `https://static.upbit.com/logos/${upper}.png`;
+}
+
+function getExchangeBadgeText(exchangeKey) {
+    const base = String(exchangeKey || '').split('_')[0];
+    if (base === 'upbit') return 'UP';
+    if (base === 'bithumb') return 'BT';
+    if (base === 'coinone') return 'CO';
+    if (base === 'gopax') return 'GX';
+    if (base === 'binance') return 'BN';
+    if (base === 'bybit') return 'BY';
+    if (base === 'okx') return 'OK';
+    if (base === 'bitget') return 'BG';
+    if (base === 'gate') return 'GT';
+    return base.slice(0, 2).toUpperCase() || '--';
+}
+
+function getExchangeLogoCandidates(exchangeKey) {
+    const base = String(exchangeKey || '').split('_')[0];
+    const favicon = (domain) => `https://www.google.com/s2/favicons?domain=${domain}&sz=64`;
+    const logos = {
+        upbit: [
+            favicon('upbit.com'),
+            'https://upbit.com/favicon.ico',
+        ],
+        bithumb: [
+            favicon('bithumb.com'),
+            'https://www.bithumb.com/favicon.ico',
+        ],
+        coinone: [
+            favicon('coinone.co.kr'),
+        ],
+        gopax: [
+            favicon('gopax.co.kr'),
+            'https://www.gopax.co.kr/favicon.ico',
+        ],
+        binance: [
+            favicon('binance.com'),
+            'https://bin.bnbstatic.com/static/images/common/favicon.ico',
+        ],
+        bybit: [
+            favicon('bybit.com'),
+            'https://www.bybit.com/favicon.ico',
+        ],
+        okx: [
+            favicon('okx.com'),
+            'https://www.okx.com/favicon.ico',
+        ],
+        bitget: [
+            favicon('bitget.com'),
+            'https://www.bitget.com/favicon.ico',
+        ],
+        gate: [
+            favicon('gate.io'),
+            'https://www.gate.io/favicon.ico',
+        ],
+    };
+    return logos[base] || [];
+}
+
+const enhancedSelectRegistry = new Map();
+
+function buildCustomOptionHtml(value, label) {
+    const logo = getExchangeLogoCandidates(value)[0] || '';
+    return `
+        <span class="custom-select-logo-wrap">
+            <img class="custom-select-logo" src="${logo}" alt="${value}" loading="lazy" referrerpolicy="no-referrer" />
+        </span>
+        <span class="custom-select-label">${label}</span>
+    `;
+}
+
+function renderEnhancedSelect(selectEl) {
+    const state = enhancedSelectRegistry.get(selectEl);
+    if (!state) return;
+
+    const selectedOption = selectEl.options[selectEl.selectedIndex];
+    if (!selectedOption) return;
+    state.trigger.innerHTML = buildCustomOptionHtml(selectEl.value, selectedOption.textContent || selectedOption.label || '');
+
+    state.menu.innerHTML = '';
+    Array.from(selectEl.options).forEach((option) => {
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'custom-select-option';
+        item.dataset.value = option.value;
+        item.innerHTML = buildCustomOptionHtml(option.value, option.textContent || option.label || option.value);
+        if (option.value === selectEl.value) item.classList.add('active');
+        item.addEventListener('click', () => {
+            if (selectEl.value !== option.value) {
+                selectEl.value = option.value;
+                selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            state.root.classList.remove('open');
+        });
+        state.menu.appendChild(item);
+    });
+}
+
+function enhanceSelectWithLogos(selectEl) {
+    if (!selectEl || enhancedSelectRegistry.has(selectEl)) return;
+    const group = selectEl.closest('.exchange-select-group');
+    if (!group) return;
+
+    selectEl.classList.add('native-hidden-select');
+
+    const root = document.createElement('div');
+    root.className = 'custom-select';
+
+    const trigger = document.createElement('button');
+    trigger.type = 'button';
+    trigger.className = 'custom-select-trigger';
+
+    const menu = document.createElement('div');
+    menu.className = 'custom-select-menu';
+
+    root.appendChild(trigger);
+    root.appendChild(menu);
+    group.appendChild(root);
+
+    const state = { root, trigger, menu };
+    enhancedSelectRegistry.set(selectEl, state);
+
+    trigger.addEventListener('click', (event) => {
+        event.stopPropagation();
+        const willOpen = !root.classList.contains('open');
+        enhancedSelectRegistry.forEach((s) => s.root.classList.remove('open'));
+        if (willOpen) root.classList.add('open');
+    });
+
+    selectEl.addEventListener('change', () => {
+        renderEnhancedSelect(selectEl);
+    });
+
+    renderEnhancedSelect(selectEl);
+}
+
+function initExchangeSelectLogos() {
+    enhanceSelectWithLogos(domesticExchangeSelect);
+    enhanceSelectWithLogos(globalExchangeSelect);
+}
+
 function getValueToneClass(value) {
     if (!Number.isFinite(value)) return 'tone-neutral';
     if (value > 0) return 'tone-positive';
     if (value < 0) return 'tone-negative';
     return 'tone-neutral';
+}
+
+function formatStatusBool(value) {
+    if (value === true) return '가능';
+    if (value === false) return '불가';
+    return '데이터 없음';
+}
+
+function getStatusToneClass(value) {
+    if (value === true) return 'status-on';
+    if (value === false) return 'status-off';
+    return 'status-unknown';
+}
+
+function getStatusEndpointUrl(symbol, domesticKey, foreignKey) {
+    const explicit = String(window.KIMP_STATUS_URL || localStorage.getItem('KIMP_STATUS_URL') || '').trim();
+    let base = explicit || '/asset-status';
+    if (!/^https?:\/\//i.test(base)) {
+        base = new URL(base, window.location.origin).toString();
+    }
+    const url = new URL(base);
+    url.searchParams.set('symbol', symbol);
+    url.searchParams.set('domestic', domesticKey);
+    url.searchParams.set('foreign', foreignKey);
+    return url.toString();
+}
+
+function getStatusEndpointCandidates(symbol, domesticKey, foreignKey) {
+    const candidates = [];
+    const explicit = String(window.KIMP_STATUS_URL || localStorage.getItem('KIMP_STATUS_URL') || '').trim();
+    if (explicit) {
+        try {
+            const url = new URL(explicit, window.location.origin);
+            url.searchParams.set('symbol', symbol);
+            url.searchParams.set('domestic', domesticKey);
+            url.searchParams.set('foreign', foreignKey);
+            candidates.push(url.toString());
+        } catch (_error) {
+            // ignore invalid explicit url
+        }
+    }
+
+    const wsUrl = normalizeWsUrl(window.KIMP_WS_URL || localStorage.getItem('KIMP_WS_URL'));
+    if (wsUrl) {
+        try {
+            const ws = new URL(wsUrl);
+            ws.protocol = ws.protocol === 'wss:' ? 'https:' : 'http:';
+            ws.pathname = '/asset-status';
+            ws.search = '';
+            ws.searchParams.set('symbol', symbol);
+            ws.searchParams.set('domestic', domesticKey);
+            ws.searchParams.set('foreign', foreignKey);
+            candidates.push(ws.toString());
+        } catch (_error) {
+            // ignore invalid ws url
+        }
+    }
+
+    candidates.push(getStatusEndpointUrl(symbol, domesticKey, foreignKey));
+    return [...new Set(candidates)];
+}
+
+async function fetchAssetStatus(symbol, domesticKey, foreignKey) {
+    const cacheKey = `${domesticKey}:${foreignKey}:${symbol}`;
+    const cached = detailStatusCache.get(cacheKey);
+    if (cached) {
+        const domesticNetworks = cached?.data?.exchanges?.[domesticKey]?.networks || [];
+        const foreignNetworks = cached?.data?.exchanges?.[foreignKey]?.networks || [];
+        const hasAnyNetworks = domesticNetworks.length > 0 || foreignNetworks.length > 0;
+        const ttl = hasAnyNetworks ? DETAIL_STATUS_TTL_MS : DETAIL_STATUS_EMPTY_TTL_MS;
+        if (Date.now() - cached.ts < ttl) {
+            return cached.data;
+        }
+    }
+    let lastError = null;
+    for (const endpoint of getStatusEndpointCandidates(symbol, domesticKey, foreignKey)) {
+        try {
+            const response = await fetch(endpoint);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            const data = await response.json();
+            detailStatusCache.set(cacheKey, { ts: Date.now(), data });
+            return data;
+        } catch (error) {
+            lastError = error;
+        }
+    }
+    const fallback = await fetchAssetStatusClientFallback(symbol, domesticKey, foreignKey);
+    detailStatusCache.set(cacheKey, { ts: Date.now(), data: fallback });
+    return fallback;
+}
+
+async function fetchAssetStatusClientFallback(symbol, domesticKey, foreignKey) {
+    const upper = String(symbol || '').toUpperCase();
+    const domesticBase = String(domesticKey || '').split('_')[0];
+    const foreignBase = String(foreignKey || '').split('_')[0];
+
+    const payload = {
+        symbol: upper,
+        domestic: domesticKey,
+        foreign: foreignKey,
+        exchanges: {
+            [domesticKey]: {
+                exchange: domesticKey,
+                label: domesticExchangeMeta[domesticKey]?.label || domesticKey,
+                summary: { deposit: null, withdraw: null },
+                networks: [{ network: '서버 연결 필요', deposit: null, withdraw: null }],
+            },
+            [foreignKey]: {
+                exchange: foreignKey,
+                label: globalExchangeMeta[foreignKey]?.label || foreignKey,
+                summary: { deposit: null, withdraw: null },
+                networks: [{ network: '서버 연결 필요', deposit: null, withdraw: null }],
+            },
+        },
+    };
+
+    const withSummary = (exchange, label, networks) => ({
+        exchange,
+        label,
+        summary: {
+            deposit: networks.some((n) => n.deposit === true),
+            withdraw: networks.some((n) => n.withdraw === true),
+        },
+        networks,
+    });
+
+    if (domesticBase === 'bithumb') {
+        try {
+            const res = await fetchJson('https://api.bithumb.com/public/assetsstatus/ALL');
+            const item = res?.data?.[upper];
+            if (item) {
+                const deposit = Number(item.deposit_status) === 1;
+                const withdraw = Number(item.withdrawal_status) === 1;
+                payload.exchanges[domesticKey] = withSummary(
+                    domesticKey,
+                    domesticExchangeMeta[domesticKey]?.label || domesticKey,
+                    [{ network: 'MAIN', deposit, withdraw }]
+                );
+            }
+        } catch (_) {}
+    } else if (domesticBase === 'coinone') {
+        try {
+            const res = await fetchJson('https://api.coinone.co.kr/public/v2/currencies');
+            const item = (res?.currencies || []).find((c) => String(c.symbol || '').toUpperCase() === upper);
+            if (item) {
+                const deposit = String(item.deposit_status || '').toLowerCase() === 'normal';
+                const withdraw = String(item.withdraw_status || '').toLowerCase() === 'normal';
+                payload.exchanges[domesticKey] = withSummary(
+                    domesticKey,
+                    domesticExchangeMeta[domesticKey]?.label || domesticKey,
+                    [{ network: 'MAIN', deposit, withdraw }]
+                );
+            }
+        } catch (_) {}
+    } else if (domesticBase === 'upbit' || domesticBase === 'gopax') {
+        payload.exchanges[domesticKey] = {
+            exchange: domesticKey,
+            label: domesticExchangeMeta[domesticKey]?.label || domesticKey,
+            summary: { deposit: null, withdraw: null },
+            networks: [{ network: 'API 키 필요', deposit: null, withdraw: null }],
+        };
+    }
+
+    if (foreignBase === 'binance') {
+        try {
+            const res = await fetchJson('https://www.binance.com/bapi/capital/v1/public/capital/getNetworkCoinAll');
+            const coin = (res?.data || []).find((item) => String(item.coin || '').toUpperCase() === upper);
+            if (coin) {
+                const networks = (coin.networkList || []).map((n) => ({
+                    network: n.networkDisplay || n.network || '-',
+                    deposit: Boolean(n.depositEnable),
+                    withdraw: Boolean(n.withdrawEnable),
+                }));
+                payload.exchanges[foreignKey] = withSummary(
+                    foreignKey,
+                    globalExchangeMeta[foreignKey]?.label || foreignKey,
+                    networks
+                );
+            }
+        } catch (_) {}
+    } else if (foreignBase === 'bitget') {
+        try {
+            const res = await fetchJson(`https://api.bitget.com/api/v2/spot/public/coins?coin=${upper}`);
+            const coin = (res?.data || [])[0];
+            if (coin) {
+                const networks = (coin.chains || []).map((n) => ({
+                    network: n.chain || '-',
+                    deposit: String(n.rechargeable).toLowerCase() === 'true',
+                    withdraw: String(n.withdrawable).toLowerCase() === 'true',
+                }));
+                payload.exchanges[foreignKey] = withSummary(
+                    foreignKey,
+                    globalExchangeMeta[foreignKey]?.label || foreignKey,
+                    networks
+                );
+            }
+        } catch (_) {}
+    } else if (foreignBase === 'gate') {
+        try {
+            const res = await fetchJson(`https://api.gateio.ws/api/v4/wallet/currency_chains?currency=${upper}`);
+            const networks = (Array.isArray(res) ? res : []).map((n) => ({
+                network: n.chain || '-',
+                deposit: Number(n.is_deposit_disabled) === 0 && Number(n.is_disabled) === 0,
+                withdraw: Number(n.is_withdraw_disabled) === 0 && Number(n.is_disabled) === 0,
+            }));
+            if (networks.length) {
+                payload.exchanges[foreignKey] = withSummary(
+                    foreignKey,
+                    globalExchangeMeta[foreignKey]?.label || foreignKey,
+                    networks
+                );
+            }
+        } catch (_) {}
+    } else if (foreignBase === 'okx' || foreignBase === 'bybit') {
+        payload.exchanges[foreignKey] = {
+            exchange: foreignKey,
+            label: globalExchangeMeta[foreignKey]?.label || foreignKey,
+            summary: { deposit: null, withdraw: null },
+            networks: [{ network: 'API 키 필요', deposit: null, withdraw: null }],
+        };
+    }
+
+    return payload;
+}
+
+async function fetchDomesticByExchangeCached(exchangeKey, nameMap) {
+    const cached = domesticTickerCache.get(exchangeKey);
+    if (cached && Date.now() - cached.ts < DOMESTIC_CACHE_TTL_MS) {
+        return cached.data;
+    }
+    const data = await fetchDomesticByExchange(exchangeKey, nameMap);
+    domesticTickerCache.set(exchangeKey, { ts: Date.now(), data });
+    return data;
+}
+
+async function fetchGlobalByExchangeCached(exchangeKey) {
+    const cached = globalTickerCache.get(exchangeKey);
+    if (cached && Date.now() - cached.ts < GLOBAL_CACHE_TTL_MS) {
+        return cached.data;
+    }
+    const data = await fetchGlobalByExchange(exchangeKey);
+    globalTickerCache.set(exchangeKey, { ts: Date.now(), data });
+    return data;
+}
+
+async function fetchDomesticResilient(exchangeKey, nameMap) {
+    try {
+        const data = await fetchDomesticByExchangeCached(exchangeKey, nameMap);
+        if (Object.keys(data || {}).length > 0) return data;
+    } catch (_error) {
+        // fallback below
+    }
+    const fallback = await fetchDomesticWithFallback(exchangeKey, nameMap);
+    return fallback.data || {};
+}
+
+async function fetchGlobalResilient(exchangeKey) {
+    try {
+        const data = await fetchGlobalByExchangeCached(exchangeKey);
+        if (Object.keys(data || {}).length > 0) return data;
+    } catch (_error) {
+        // fallback below
+    }
+    const fallback = await fetchGlobalWithFallback(exchangeKey);
+    return fallback.data || {};
+}
+
+async function fetchUsdKrwRateCached() {
+    if (Date.now() - rateCache.ts < RATE_CACHE_TTL_MS && Number.isFinite(rateCache.value)) {
+        return rateCache.value;
+    }
+    const rate = await fetchUsdKrwRate();
+    if (Number.isFinite(rate) && rate > 500 && rate < 3000) {
+        rateCache = { ts: Date.now(), value: rate };
+        return rate;
+    }
+    return rateCache.value || 1400;
 }
 
 function chunkArray(items, size) {
@@ -324,7 +781,7 @@ function isNetworkLikeError(error) {
     return error instanceof TypeError || String(error).includes('Failed to fetch');
 }
 
-function withTimeoutFetch(url, timeoutMs = 7000) {
+function withTimeoutFetch(url, timeoutMs = 8000) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     return fetch(url, { signal: controller.signal })
@@ -338,10 +795,13 @@ function buildCorsProxyUrls(url) {
     const encoded = encodeURIComponent(url);
     return [
         `https://api.allorigins.win/raw?url=${encoded}`,
+        `https://corsproxy.io/?${encoded}`,
+        `https://r.jina.ai/http://${url.replace(/^https?:\/\//i, '')}`,
     ];
 }
 
 async function fetchJson(url) {
+    let primaryError = null;
     try {
         const response = await withTimeoutFetch(url);
         if (!response.ok) {
@@ -349,25 +809,23 @@ async function fetchJson(url) {
         }
         return response.json();
     } catch (error) {
-        if (!isNetworkLikeError(error)) {
-            throw error;
-        }
-
-        const proxyUrls = buildCorsProxyUrls(url);
-        let lastError = error;
-        for (const proxyUrl of proxyUrls) {
-            try {
-                const proxyResponse = await withTimeoutFetch(proxyUrl);
-                if (!proxyResponse.ok) {
-                    throw new Error(`HTTP ${proxyResponse.status} for ${proxyUrl}`);
-                }
-                return proxyResponse.json();
-            } catch (proxyError) {
-                lastError = proxyError;
-            }
-        }
-        throw lastError;
+        primaryError = error;
     }
+
+    const proxyUrls = buildCorsProxyUrls(url);
+    let lastError = primaryError;
+    for (const proxyUrl of proxyUrls) {
+        try {
+            const proxyResponse = await withTimeoutFetch(proxyUrl, 9000);
+            if (!proxyResponse.ok) {
+                throw new Error(`HTTP ${proxyResponse.status} for ${proxyUrl}`);
+            }
+            return proxyResponse.json();
+        } catch (proxyError) {
+            lastError = proxyError;
+        }
+    }
+    throw lastError || new Error(`Failed to fetch: ${url}`);
 }
 
 async function fetchJsonFromAny(urls) {
@@ -377,12 +835,48 @@ async function fetchJsonFromAny(urls) {
             return await fetchJson(url);
         } catch (error) {
             lastError = error;
-            if (!isNetworkLikeError(error)) {
-                throw error;
-            }
         }
     }
     throw lastError || new Error('All endpoints failed');
+}
+
+function loadRowsFromCache() {
+    try {
+        const raw = localStorage.getItem(ROW_CACHE_KEY);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return [];
+        return parsed.filter((row) => row && typeof row.symbol === 'string' && Number.isFinite(Number(row.price)));
+    } catch (_error) {
+        return [];
+    }
+}
+
+function saveRowsToCache(rows) {
+    try {
+        const normalized = (rows || []).slice(0, 300).map((row) => ({
+            symbol: row.symbol,
+            name: row.name,
+            price: Number(row.price),
+            gimp: Number(row.gimp),
+            change: Number(row.change),
+            volume: Number(row.volume),
+            globalPrice: Number(row.globalPrice),
+            globalChange: Number(row.globalChange),
+            globalVolume: Number(row.globalVolume),
+        }));
+        localStorage.setItem(ROW_CACHE_KEY, JSON.stringify(normalized));
+    } catch (_error) {
+        // ignore cache errors
+    }
+}
+
+function hydrateRowsFromCache() {
+    const cachedRows = loadRowsFromCache();
+    if (!cachedRows.length) return;
+    tableState.rows = cachedRows;
+    hasSuccessfulRender = true;
+    renderRows();
 }
 
 async function getSymbolNameMap() {
@@ -598,12 +1092,71 @@ async function fetchBybitGlobal() {
     return bySymbol;
 }
 
+async function fetchBinancePerpGlobal() {
+    const tickers = await fetchJsonFromAny([
+        'https://fapi.binance.com/fapi/v1/ticker/24hr',
+        'https://fstream.binance.com/fapi/v1/ticker/24hr',
+    ]);
+    const bySymbol = {};
+    tickers.forEach((ticker) => {
+        const symbol = extractUsdtSymbol(String(ticker.symbol || ''));
+        if (!symbol) return;
+        bySymbol[symbol] = {
+            price: Number(ticker.lastPrice),
+            change: Number(ticker.priceChangePercent),
+            volume: Number(ticker.quoteVolume || 0),
+        };
+    });
+    return bySymbol;
+}
+
+async function fetchBybitPerpGlobal() {
+    const response = await fetchJsonFromAny([
+        'https://api.bybit.com/v5/market/tickers?category=linear',
+        'https://api.bytick.com/v5/market/tickers?category=linear',
+    ]);
+    const bySymbol = {};
+    (response.result?.list || []).forEach((ticker) => {
+        const symbol = extractUsdtSymbol(String(ticker.symbol || ''));
+        if (!symbol) return;
+        bySymbol[symbol] = {
+            price: Number(ticker.lastPrice),
+            change: Number(ticker.price24hPcnt) * 100,
+            volume: Number(ticker.turnover24h || 0),
+        };
+    });
+    return bySymbol;
+}
+
 async function fetchOkxGlobal() {
-    const response = await fetchJson('https://www.okx.com/api/v5/market/tickers?instType=SPOT');
+    const response = await fetchJsonFromAny([
+        'https://www.okx.com/api/v5/market/tickers?instType=SPOT',
+        'https://aws.okx.com/api/v5/market/tickers?instType=SPOT',
+    ]);
     const bySymbol = {};
     (response.data || []).forEach((ticker) => {
         if (!ticker.instId || !ticker.instId.endsWith('-USDT')) return;
         const symbol = ticker.instId.replace('-USDT', '');
+        const last = Number(ticker.last);
+        const open = Number(ticker.open24h);
+        bySymbol[symbol] = {
+            price: last,
+            change: open > 0 ? ((last - open) / open) * 100 : 0,
+            volume: Number(ticker.volCcy24h || 0),
+        };
+    });
+    return bySymbol;
+}
+
+async function fetchOkxPerpGlobal() {
+    const response = await fetchJsonFromAny([
+        'https://www.okx.com/api/v5/market/tickers?instType=SWAP',
+        'https://aws.okx.com/api/v5/market/tickers?instType=SWAP',
+    ]);
+    const bySymbol = {};
+    (response.data || []).forEach((ticker) => {
+        if (!ticker.instId || !ticker.instId.endsWith('-USDT-SWAP')) return;
+        const symbol = ticker.instId.replace('-USDT-SWAP', '');
         const last = Number(ticker.last);
         const open = Number(ticker.open24h);
         bySymbol[symbol] = {
@@ -647,6 +1200,21 @@ async function fetchBitgetGlobal() {
     return bySymbol;
 }
 
+async function fetchBitgetPerpGlobal() {
+    const response = await fetchJson('https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES');
+    const bySymbol = {};
+    (response.data || []).forEach((ticker) => {
+        const symbol = extractUsdtSymbol(String(ticker.symbol || ''));
+        if (!symbol) return;
+        bySymbol[symbol] = {
+            price: Number(ticker.lastPr),
+            change: Number(ticker.change24h) * 100,
+            volume: Number(ticker.usdtVolume || ticker.quoteVolume || 0),
+        };
+    });
+    return bySymbol;
+}
+
 async function fetchGateGlobal() {
     const tickers = await fetchJson('https://api.gateio.ws/api/v4/spot/tickers');
     const bySymbol = {};
@@ -662,6 +1230,21 @@ async function fetchGateGlobal() {
     return bySymbol;
 }
 
+async function fetchGatePerpGlobal() {
+    const tickers = await fetchJson('https://api.gateio.ws/api/v4/futures/usdt/tickers');
+    const bySymbol = {};
+    tickers.forEach((ticker) => {
+        if (!ticker.contract || !ticker.contract.endsWith('_USDT')) return;
+        const symbol = ticker.contract.replace('_USDT', '');
+        bySymbol[symbol] = {
+            price: Number(ticker.last),
+            change: Number(ticker.change_percentage),
+            volume: Number(ticker.volume_24h_quote || ticker.volume_24h_settle || 0),
+        };
+    });
+    return bySymbol;
+}
+
 async function fetchDomesticByExchange(exchangeKey, nameMap) {
     if (exchangeKey === 'upbit') return fetchUpbitDomestic(nameMap);
     if (exchangeKey === 'bithumb') return fetchBithumbDomestic(nameMap);
@@ -672,11 +1255,15 @@ async function fetchDomesticByExchange(exchangeKey, nameMap) {
 
 async function fetchGlobalByExchange(exchangeKey) {
     if (exchangeKey === 'binance') return fetchBinanceGlobal();
+    if (exchangeKey === 'binance_perp') return fetchBinancePerpGlobal();
     if (exchangeKey === 'bybit') return fetchBybitGlobal();
+    if (exchangeKey === 'bybit_perp') return fetchBybitPerpGlobal();
     if (exchangeKey === 'okx') return fetchOkxGlobal();
-    if (exchangeKey === 'mexc') return fetchMexcGlobal();
+    if (exchangeKey === 'okx_perp') return fetchOkxPerpGlobal();
     if (exchangeKey === 'bitget') return fetchBitgetGlobal();
+    if (exchangeKey === 'bitget_perp') return fetchBitgetPerpGlobal();
     if (exchangeKey === 'gate') return fetchGateGlobal();
+    if (exchangeKey === 'gate_perp') return fetchGatePerpGlobal();
     return {};
 }
 
@@ -763,7 +1350,11 @@ function renderRows() {
         const globalChangeTone = getValueToneClass(coin.globalChange);
         row.innerHTML = `
             <td class="cell-name">
-                <div>${coin.name} (${coin.symbol})</div>
+                <div class="cell-main main-value coin-row-main">
+                    <img class="coin-logo" src="${getCoinLogoUrl(coin.symbol)}" alt="${coin.symbol}" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none';" />
+                    <span>${coin.name}</span>
+                </div>
+                <div class="cell-sub sub-value">${coin.symbol}</div>
             </td>
             <td class="cell-num">
                 <div class="cell-main main-value">${formatNumber(coin.price)}</div>
@@ -782,8 +1373,181 @@ function renderRows() {
             </td>
         `;
         cryptoTableBody.appendChild(row);
+        if (coin.symbol === tableState.selectedSymbol) {
+            const detailRow = createDetailRow(coin);
+            cryptoTableBody.appendChild(detailRow);
+            renderDetailCharts(coin.symbol, tableState.detailInterval);
+            hydrateDetailStatus(coin.symbol);
+        }
     });
     updateSortIndicators();
+}
+
+function renderExchangeStatusBlock(status) {
+    const exchangeName = status?.label || status?.exchange || '-';
+    const summaryDeposit = status?.summary?.deposit;
+    const summaryWithdraw = status?.summary?.withdraw;
+    const networks = Array.isArray(status?.networks) ? status.networks : [];
+    const exchangeKey = String(status?.exchange || exchangeName).toLowerCase();
+    const logoCandidates = getExchangeLogoCandidates(exchangeKey);
+    const logoSrc = logoCandidates[0] || '';
+    const logoFallback = getExchangeBadgeText(exchangeKey);
+    const networkItems = networks.length
+        ? networks.map((network) => `
+            <div class="network-item">
+                <span class="network-name">${network.network || '-'}</span>
+                <span class="network-badges">
+                    <span class="network-dot ${getStatusToneClass(network.deposit)}" title="입금 ${formatStatusBool(network.deposit)}"></span>
+                    <span class="network-dot ${getStatusToneClass(network.withdraw)}" title="출금 ${formatStatusBool(network.withdraw)}"></span>
+                </span>
+            </div>
+        `).join('')
+        : '<div class="network-empty">데이터 없음</div>';
+
+    return `
+        <div class="exchange-status-head">
+            <div class="exchange-name-wrap">
+                <span class="exchange-logo-wrap">
+                    <img class="exchange-logo-img-inline" src="${logoSrc}" alt="${exchangeKey}" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none';this.nextElementSibling.style.display='inline-flex';" />
+                    <span class="exchange-logo-fallback" style="display:none;">${logoFallback}</span>
+                </span>
+                <div class="exchange-name">${exchangeName}</div>
+            </div>
+            <div class="summary-badges">
+                <span class="network-badge ${getStatusToneClass(summaryDeposit)}">입금 ${formatStatusBool(summaryDeposit)}</span>
+                <span class="network-badge ${getStatusToneClass(summaryWithdraw)}">출금 ${formatStatusBool(summaryWithdraw)}</span>
+            </div>
+        </div>
+        <div class="network-line">
+            <span class="network-label">네트워크</span>
+            <div class="network-list">${networkItems}</div>
+        </div>
+    `;
+}
+
+function buildDetailIntervalButtons() {
+    return DETAIL_INTERVALS.map((item) => `
+        <button type="button" class="detail-interval-btn ${tableState.detailInterval === item.value ? 'active' : ''}" data-interval="${item.value}">
+            ${item.label}
+        </button>
+    `).join('');
+}
+
+function buildDomesticTvSymbol(exchangeKey, symbol) {
+    if (exchangeKey === 'upbit') return `UPBIT:${symbol}KRW`;
+    if (exchangeKey === 'bithumb') return `BITHUMB:${symbol}KRW`;
+    if (exchangeKey === 'coinone') return `COINONE:${symbol}KRW`;
+    if (exchangeKey === 'gopax') return `GOPAX:${symbol}KRW`;
+    return `UPBIT:${symbol}KRW`;
+}
+
+function buildGlobalTvSymbol(exchangeKey, symbol) {
+    if (exchangeKey === 'binance') return `BINANCE:${symbol}USDT`;
+    if (exchangeKey === 'binance_perp') return `BINANCE:${symbol}USDTPERP`;
+    if (exchangeKey === 'bybit') return `BYBIT:${symbol}USDT`;
+    if (exchangeKey === 'bybit_perp') return `BYBIT:${symbol}USDT.P`;
+    if (exchangeKey === 'okx') return `OKX:${symbol}USDT`;
+    if (exchangeKey === 'okx_perp') return `OKX:${symbol}USDT.P`;
+    if (exchangeKey === 'bitget') return `BITGET:${symbol}USDT`;
+    if (exchangeKey === 'bitget_perp') return `BITGET:${symbol}USDT.P`;
+    if (exchangeKey === 'gate') return `GATEIO:${symbol}USDT`;
+    if (exchangeKey === 'gate_perp') return `GATEIO:${symbol}USDT.P`;
+    return `BINANCE:${symbol}USDT`;
+}
+
+function renderDetailCharts(symbol, interval) {
+    const upbitContainer = document.getElementById(`detail-upbit-${symbol}`);
+    const binanceContainer = document.getElementById(`detail-binance-${symbol}`);
+    if (!upbitContainer || !binanceContainer) return;
+
+    const domesticKey = domesticExchangeSelect.value;
+    const globalKey = globalExchangeSelect.value;
+    const upbitSrc = buildTradingViewEmbedUrl(buildDomesticTvSymbol(domesticKey, symbol), interval);
+    const binanceSrc = buildTradingViewEmbedUrl(buildGlobalTvSymbol(globalKey, symbol), interval);
+    upbitContainer.innerHTML = `
+        <iframe
+            title="detail-upbit-${symbol}-${interval}"
+            src="${upbitSrc}"
+            class="pair-chart-iframe"
+            loading="lazy"
+            referrerpolicy="no-referrer"
+        ></iframe>
+    `;
+    binanceContainer.innerHTML = `
+        <iframe
+            title="detail-binance-${symbol}-${interval}"
+            src="${binanceSrc}"
+            class="pair-chart-iframe"
+            loading="lazy"
+            referrerpolicy="no-referrer"
+        ></iframe>
+    `;
+}
+
+async function hydrateDetailStatus(symbol) {
+    const domesticContainer = document.getElementById(`detail-status-domestic-${symbol}`);
+    const foreignContainer = document.getElementById(`detail-status-foreign-${symbol}`);
+    if (!domesticContainer || !foreignContainer) return;
+
+    const domesticKey = domesticExchangeSelect.value;
+    const foreignKey = globalExchangeSelect.value;
+
+    try {
+        const payload = await fetchAssetStatus(symbol, domesticKey, foreignKey);
+        const domesticStatus = payload?.exchanges?.[domesticKey] || null;
+        const foreignStatus = payload?.exchanges?.[foreignKey] || null;
+
+        if (tableState.selectedSymbol !== symbol) return;
+        domesticContainer.innerHTML = renderExchangeStatusBlock(domesticStatus);
+        foreignContainer.innerHTML = renderExchangeStatusBlock(foreignStatus);
+    } catch (_error) {
+        if (tableState.selectedSymbol !== symbol) return;
+        domesticContainer.innerHTML = renderExchangeStatusBlock({
+            label: domesticExchangeMeta[domesticKey]?.label || domesticKey,
+            summary: { deposit: null, withdraw: null },
+            networks: [],
+        });
+        foreignContainer.innerHTML = renderExchangeStatusBlock({
+            label: globalExchangeMeta[foreignKey]?.label || foreignKey,
+            summary: { deposit: null, withdraw: null },
+            networks: [],
+        });
+    }
+}
+
+function createDetailRow(coin) {
+    const detailRow = document.createElement('tr');
+    detailRow.className = 'detail-row';
+    detailRow.dataset.detailFor = coin.symbol;
+    const domesticLabel = domesticExchangeMeta[domesticExchangeSelect.value]?.label || domesticExchangeSelect.value;
+    const foreignLabel = globalExchangeMeta[globalExchangeSelect.value]?.label || globalExchangeSelect.value;
+
+    detailRow.innerHTML = `
+        <td colspan="5">
+            <div class="detail-panel">
+                <div class="detail-status-grid">
+                    <div class="exchange-status-card" id="detail-status-domestic-${coin.symbol}">
+                        <div class="network-empty">${domesticLabel} 입출금 상태 로딩 중...</div>
+                    </div>
+                    <div class="exchange-status-card" id="detail-status-foreign-${coin.symbol}">
+                        <div class="network-empty">${foreignLabel} 입출금 상태 로딩 중...</div>
+                    </div>
+                </div>
+                <div class="detail-intervals">${buildDetailIntervalButtons()}</div>
+                <div class="detail-chart-grid">
+                    <div class="pair-chart-box">
+                        <h4>${domesticLabel}</h4>
+                        <div id="detail-upbit-${coin.symbol}" class="pair-chart-container"></div>
+                    </div>
+                    <div class="pair-chart-box">
+                        <h4>${foreignLabel}</h4>
+                        <div id="detail-binance-${coin.symbol}" class="pair-chart-container"></div>
+                    </div>
+                </div>
+            </div>
+        </td>
+    `;
+    return detailRow;
 }
 
 function buildTradingViewEmbedUrl(symbol, interval) {
@@ -813,7 +1577,7 @@ function renderPairCharts(symbol) {
     const displayName = selected ? `${selected.name} (${symbol})` : symbol;
 
     pairChartSection.classList.add('visible');
-    pairChartTitle.textContent = `종목 비교 차트 (업비트 vs 바이낸스)`;
+    pairChartTitle.textContent = '종목 비교 차트';
     pairChartSymbol.textContent = `선택 종목: ${displayName}`;
 
     const upbitSrc = buildTradingViewEmbedUrl(`UPBIT:${symbol}KRW`, '60');
@@ -849,28 +1613,36 @@ async function loadMarketRows(options = {}) {
     const selectedGlobalKey = globalExchangeSelect.value;
     const domestic = domesticExchangeMeta[selectedDomesticKey];
     const global = globalExchangeMeta[selectedGlobalKey];
-    selectedExchangePair.textContent = `${domestic.label} vs ${global.label}`;
-    if (!silent || tableState.rows.length === 0) {
+    selectedExchangePair.textContent = `${domestic.label} / ${global.label}`;
+    if (tableState.rows.length === 0) {
         setLoadingRow('실시간 종목 데이터를 불러오는 중...');
     }
 
     try {
-        const [nameMap, usdKrw] = await Promise.all([
-            getSymbolNameMap(),
-            fetchUsdKrwRate(),
+        const nameMapPromise = getSymbolNameMap().catch(() => ({}));
+        const usdKrwPromise = fetchUsdKrwRateCached()
+            .then((rate) => {
+                if (Number.isFinite(rate) && rate > 500 && rate < 3000) {
+                    lastUsdKrwRate = rate;
+                    return rate;
+                }
+                return lastUsdKrwRate;
+            })
+            .catch(() => lastUsdKrwRate);
+        const usdKrwFastPromise = Promise.race([
+            usdKrwPromise,
+            new Promise((resolve) => setTimeout(() => resolve(lastUsdKrwRate), 1100)),
         ]);
-        const [domesticResult, globalResult] = await Promise.all([
-            fetchDomesticWithFallback(selectedDomesticKey, nameMap),
-            fetchGlobalWithFallback(selectedGlobalKey),
+
+        const [domesticMap, globalMap, usdKrw] = await Promise.all([
+            fetchDomesticResilient(selectedDomesticKey, {}),
+            fetchGlobalResilient(selectedGlobalKey),
+            usdKrwFastPromise,
         ]);
 
         if (requestId !== latestRequestId) return;
-        const domesticMap = domesticResult.data;
-        const globalMap = globalResult.data;
-        const domesticLabel = domesticExchangeMeta[domesticResult.exchangeKey]?.label || domestic.label;
-        const globalLabel = globalExchangeMeta[globalResult.exchangeKey]?.label || global.label;
-        selectedExchangePair.textContent = `${domesticLabel} vs ${globalLabel}`;
-        tableState.globalExchangeLabel = globalLabel;
+        selectedExchangePair.textContent = `${domestic.label} / ${global.label}`;
+        tableState.globalExchangeLabel = global.label;
 
         const rows = [];
         Object.values(domesticMap).forEach((domesticTicker) => {
@@ -899,8 +1671,25 @@ async function loadMarketRows(options = {}) {
             return;
         }
         consecutiveLoadFailures = 0;
+        lastRestFetchAt = Date.now();
         hasSuccessfulRender = true;
+        saveRowsToCache(rows);
         renderRows();
+
+        nameMapPromise.then((nameMap) => {
+            if (requestId !== latestRequestId || !nameMap || typeof nameMap !== 'object') return;
+            let changed = false;
+            tableState.rows = tableState.rows.map((row) => {
+                const mapped = nameMap[row.symbol];
+                if (!mapped || mapped === row.name) return row;
+                changed = true;
+                return { ...row, name: mapped };
+            });
+            if (changed) {
+                saveRowsToCache(tableState.rows);
+                renderRows();
+            }
+        }).catch(() => {});
     } catch (error) {
         if (requestId !== latestRequestId) return;
         consecutiveLoadFailures += 1;
@@ -922,6 +1711,10 @@ async function loadMarketRows(options = {}) {
 
 async function refreshMarketRows(silent = true) {
     if (isRefreshing) return;
+    if (tableState.selectedSymbol) return;
+    if (!doEnabled && tableState.rows.length > 0 && Date.now() - lastRestFetchAt < REST_FETCH_MIN_MS) {
+        return;
+    }
     isRefreshing = true;
     try {
         await loadMarketRows({ silent });
@@ -988,7 +1781,7 @@ function applyDoSnapshot(snapshot) {
     const domestic = domesticExchangeMeta[domesticExchangeSelect.value]?.label || '업비트';
     const global = globalExchangeMeta[globalExchangeSelect.value]?.label || '바이낸스';
     tableState.globalExchangeLabel = global;
-    selectedExchangePair.textContent = `${domestic} vs ${global}`;
+    selectedExchangePair.textContent = `${domestic} / ${global}`;
 
     if (!rows.length) {
         setLoadingRow('실시간 허브에서 수신된 데이터가 없습니다.');
@@ -1112,6 +1905,7 @@ sortableHeaders.forEach((header) => {
 });
 
 domesticExchangeSelect.addEventListener('change', () => {
+    detailStatusCache.clear();
     if (doEnabled) {
         sendDoSubscribe();
     } else {
@@ -1119,6 +1913,7 @@ domesticExchangeSelect.addEventListener('change', () => {
     }
 });
 globalExchangeSelect.addEventListener('change', () => {
+    detailStatusCache.clear();
     if (doEnabled) {
         sendDoSubscribe();
     } else {
@@ -1141,14 +1936,39 @@ refreshIntervalSelect.addEventListener('change', () => {
 });
 
 cryptoTableBody.addEventListener('click', (event) => {
+    const intervalButton = event.target.closest('.detail-interval-btn');
+    if (intervalButton) {
+        const nextInterval = intervalButton.dataset.interval;
+        if (!nextInterval) return;
+        tableState.detailInterval = nextInterval;
+        if (tableState.selectedSymbol) {
+            renderRows();
+        }
+        return;
+    }
+
     const row = event.target.closest('tr[data-symbol]');
     if (!row) return;
+
+    if (tableState.selectedSymbol === row.dataset.symbol) {
+        tableState.selectedSymbol = null;
+        renderRows();
+        return;
+    }
+
     tableState.selectedSymbol = row.dataset.symbol;
     renderRows();
-    renderPairCharts(row.dataset.symbol);
+});
+
+document.addEventListener('click', () => {
+    enhancedSelectRegistry.forEach((state) => {
+        state.root.classList.remove('open');
+    });
 });
 
 loadChart();
+initExchangeSelectLogos();
+hydrateRowsFromCache();
 if (doEnabled) {
     setLoadingRow('실시간 허브에 연결 중...');
     connectDoStream();

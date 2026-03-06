@@ -111,6 +111,7 @@ body {
 }
 
 .exchange-select-group {
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
@@ -128,6 +129,120 @@ body {
     border: 1px solid #353535;
     border-radius: 6px;
     padding: 0.55rem 0.7rem;
+}
+
+.exchange-select-group select.native-hidden-select {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+    width: 0;
+    height: 0;
+}
+
+.custom-select {
+    position: relative;
+}
+
+.custom-select-trigger {
+    width: 100%;
+    background: #151515;
+    color: #efefef;
+    border: 1px solid #353535;
+    border-radius: 6px;
+    min-height: 40px;
+    padding: 0.55rem 2rem 0.55rem 0.7rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    text-align: left;
+    position: relative;
+}
+
+.custom-select-trigger::after {
+    content: '▾';
+    position: absolute;
+    right: 0.65rem;
+    color: #9eb0cf;
+}
+
+.custom-select-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    background: #10161f;
+    border: 1px solid #3a4658;
+    border-radius: 6px;
+    max-height: 280px;
+    overflow-y: auto;
+    z-index: 50;
+    display: none;
+}
+
+.custom-select.open .custom-select-menu {
+    display: block;
+}
+
+.custom-select-option {
+    width: 100%;
+    background: transparent;
+    border: 0;
+    color: #eaf0ff;
+    padding: 0.55rem 0.7rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    text-align: left;
+}
+
+.custom-select-option:hover,
+.custom-select-option.active {
+    background: #233147;
+}
+
+.custom-select-logo-wrap {
+    width: 16px;
+    height: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.custom-select-logo {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    object-fit: cover;
+    background: #0f1a2f;
+    border: 1px solid #2f84ef;
+}
+
+.custom-select-label {
+    line-height: 1.2;
+}
+
+/* legacy (kept harmless) */
+.select-logo-badge {
+    position: absolute;
+    left: 10px;
+    bottom: 11px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background-color: #0f1a2f;
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: cover;
+    border: 1px solid #2f84ef;
+    display: inline-block;
+    pointer-events: none;
+}
+
+.select-logo-badge.loading {
+    opacity: 0.5;
 }
 
 .selected-exchange-pair {
@@ -226,11 +341,77 @@ tbody td:not(:first-child) {
     line-height: 1.25;
 }
 
+.coin-row-main {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.42rem;
+}
+
+.coin-logo {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 1px solid #2d3f60;
+    background: #111a29;
+    flex-shrink: 0;
+}
+
 .cell-sub {
     margin-top: 0.2rem;
     font-size: 0.78rem;
     color: #95a3bd;
     line-height: 1.2;
+}
+
+.coin-name-line,
+.coin-sub-line {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.38rem;
+}
+
+.exchange-mark-wrap {
+    width: 18px;
+    height: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.exchange-logo-img {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 1px solid #2f84ef;
+    background: #0f1a2f;
+}
+
+.exchange-logo-img-sub {
+    border-color: #4f688f;
+}
+
+.exchange-mark {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.58rem;
+    font-weight: 700;
+    background: #1f66c2;
+    color: #eef6ff;
+    border: 1px solid #2f84ef;
+    flex-shrink: 0;
+}
+
+.exchange-mark-sub {
+    background: #2a374e;
+    border-color: #4f688f;
+    color: #dce8ff;
 }
 
 .tone-positive {
@@ -273,6 +454,202 @@ tbody tr.active-row {
     background-color: #24324a;
 }
 
+.detail-row td {
+    padding: 0;
+    background-color: #111b2f;
+}
+
+.detail-panel {
+    padding: 0.75rem 0.7rem 0.85rem;
+    border-top: 1px solid #2c3b57;
+}
+
+.detail-status-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.45rem;
+    margin-bottom: 0.65rem;
+}
+
+.exchange-status-card {
+    border: 0;
+    border-radius: 0;
+    padding: 0;
+    background: transparent;
+}
+
+.exchange-status-head {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 0.6rem;
+    margin-bottom: 0.35rem;
+}
+
+.exchange-name-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+}
+
+.exchange-logo-wrap {
+    width: 18px;
+    height: 18px;
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.exchange-logo-img-inline {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 1px solid #2f84ef;
+    background: #0f1a2f;
+}
+
+.exchange-logo-fallback {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #1c4ea5;
+    color: #e8f1ff;
+    font-size: 0.58rem;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.exchange-name {
+    font-size: 0.84rem;
+    font-weight: 700;
+    color: #d9e3f5;
+}
+
+.summary-badges {
+    display: flex;
+    gap: 0.35rem;
+    margin-left: 0.4rem;
+}
+
+.network-line {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+}
+
+.network-label {
+    color: #7f93b6;
+    font-size: 0.76rem;
+    min-width: 44px;
+    padding-top: 0.2rem;
+}
+
+.network-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+}
+
+.network-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.32rem;
+    background: #1a2840;
+    border: 1px solid #2e4468;
+    border-radius: 999px;
+    padding: 0.12rem 0.45rem;
+}
+
+.network-name {
+    color: #c4d4ef;
+    font-size: 0.74rem;
+    font-weight: 600;
+}
+
+.network-badges {
+    display: inline-flex;
+    gap: 0.2rem;
+    align-items: center;
+}
+
+.network-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+    border: 1px solid transparent;
+}
+
+.network-badge {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.72rem;
+    padding: 0.12rem 0.4rem;
+    border-radius: 999px;
+    border: 1px solid transparent;
+}
+
+.status-on {
+    color: #64d7a4;
+    border-color: #2f7f5f;
+    background: #133425;
+}
+
+.status-off {
+    color: #ff9999;
+    border-color: #8a3f3f;
+    background: #2e1717;
+}
+
+.status-unknown {
+    color: #b5c1d6;
+    border-color: #4b5870;
+    background: #1c2637;
+}
+
+.network-empty {
+    font-size: 0.78rem;
+    color: #8fa1c3;
+}
+
+.detail-intervals {
+    display: flex;
+    gap: 0.4rem;
+    margin: 0.65rem 0 0.45rem;
+    flex-wrap: wrap;
+}
+
+.detail-interval-btn {
+    background: #0d1628;
+    border: 1px solid #22344f;
+    color: #d5e3ff;
+    border-radius: 4px;
+    padding: 0.33rem 0.72rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.detail-interval-btn.active {
+    background: #2f9eff;
+    border-color: #2f9eff;
+    color: #e9f2ff;
+}
+
+.detail-chart-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.8rem;
+}
+
+.detail-chart-grid .pair-chart-box h4 {
+    display: none;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
     .dashboard {
@@ -285,6 +662,10 @@ tbody tr.active-row {
         flex-wrap: wrap;
     }
     .pair-chart-grid {
+        grid-template-columns: 1fr;
+    }
+    .detail-status-grid,
+    .detail-chart-grid {
         grid-template-columns: 1fr;
     }
 }
