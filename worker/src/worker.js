@@ -12,8 +12,6 @@ let collectorRunningPromise = null;
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const id = env.KIMP_HUB.idFromName("hub");
-    const stub = env.KIMP_HUB.get(id);
 
     if (request.method === "OPTIONS") {
       return new Response(null, {
@@ -22,19 +20,31 @@ export default {
     }
 
     if (url.pathname === "/ws") {
-      return stub.fetch(request);
+      const id = env.KIMP_HUB.idFromName("hub");
+      const stub = env.KIMP_HUB.get(id);
+      return stub.fetch(new Request(new URL("/ws", request.url), request));
     }
 
     if (url.pathname === "/status") {
+      const id = env.KIMP_HUB.idFromName("hub");
+      const stub = env.KIMP_HUB.get(id);
       return stub.fetch(new Request(new URL("/status", request.url), request));
     }
 
     if (url.pathname === "/asset-status") {
-      return stub.fetch(new Request(new URL("/asset-status" + url.search, request.url), request));
+      const symbol = String(url.searchParams.get("symbol") || url.searchParams.get("coin") || "").toUpperCase();
+      if (!symbol) return jsonResponse({ error: "coin is required" }, 400);
+      const domestic = String(url.searchParams.get("domestic") || "upbit");
+      const foreign = String(url.searchParams.get("foreign") || "binance");
+      const payload = await getAssetStatusPayload(symbol, domestic, foreign, env);
+      return jsonResponse(payload, 200);
     }
 
     if (url.pathname === "/debug/upbit") {
-      return stub.fetch(new Request(new URL("/debug/upbit" + url.search, request.url), request));
+      const coin = String(url.searchParams.get("coin") || "").toUpperCase();
+      if (!coin) return jsonResponse({ error: "coin is required" }, 400);
+      const debug = await getUpbitNoticeStatusDebug(coin);
+      return jsonResponse(debug, 200);
     }
 
     return new Response("Not found", { status: 404 });
@@ -79,6 +89,7 @@ export class KimpHub {
       if (!coin) {
         return jsonResponse({ error: "coin is required" }, 400);
       }
+      await this.ensureStarted();
       const debug = await this.getUpbitAssetStatus(coin);
       return jsonResponse(
         {
@@ -107,17 +118,16 @@ export class KimpHub {
       const upbitIndex = exchanges.indexOf("upbit");
       if (upbitIndex >= 0) {
         const upbit = await this.getUpbitAssetStatus(coin);
-        if (upbit?.normalizedResult) {
-          statuses[upbitIndex] = upbit.normalizedResult;
-        } else {
-          statuses[upbitIndex] = {
-            exchange: "upbit",
-            deposit: null,
-            withdraw: null,
-            networks: [],
-            error: upbit?.error || "Unable to parse Upbit notices",
-          };
-        }
+        statuses[upbitIndex] = upbit?.normalizedResult || {
+          exchange: "upbit",
+          deposit: true,
+          withdraw: true,
+          deposit_enabled: true,
+          withdraw_enabled: true,
+          summary: { deposit: true, withdraw: true },
+          networks: [],
+          source: "default-open",
+        };
       }
 
       return jsonResponse(
@@ -316,87 +326,129 @@ export class KimpHub {
     try {
       const cache = this.upbitPublicWalletCache;
       if (cache && Date.now() - cache.ts < COLLECTOR_INTERVAL_MS && cache.byCoin instanceof Map) {
-        const cached = cache.byCoin.get(upperCoin) || null;
-        return {
-          coin: upperCoin,
-          attempts: cache.attempts || [],
-          parsed: true,
-          matchedCount: cached?.networks?.length || 0,
-          normalizedResult: cached,
-          error: cached ? null : "No matching Upbit notice for coin",
-        };
-      }
-
-      const listUrl = "https://global-docs.upbit.com/changelog";
-      const listResponse = await fetch(listUrl, { headers: { "user-agent": "kimchi-kimp-worker/1.0" } });
-      const listText = await listResponse.text();
-      attempts.push({
-        step: "changelog_list",
-        url: listUrl,
-        status: listResponse.status,
-        ok: listResponse.ok,
-        preview: String(listText || "").slice(0, 200),
-      });
-      if (!listResponse.ok) {
-        return {
-          coin: upperCoin,
-          attempts,
-          parsed: false,
-          matchedCount: 0,
-          normalizedResult: null,
-          error: `Upbit notice list fetch failed: HTTP_${listResponse.status}`,
-        };
-      }
-
-      const linkMatches = Array.from(String(listText).matchAll(/href="(\/changelog\/[^"]+)"/g))
-        .map((m) => m[1])
-        .filter(Boolean);
-      const links = [...new Set(linkMatches)].slice(0, 40).map((path) => `https://global-docs.upbit.com${path}`);
-
-      const notices = [];
-      for (const url of links) {
-        try {
-          const response = await fetch(url, { headers: { "user-agent": "kimchi-kimp-worker/1.0" } });
-          const html = await response.text();
-          attempts.push({ step: "notice_detail", url, status: response.status, ok: response.ok });
-          if (!response.ok) continue;
-
-          const titleMatch = html.match(/<title>(.*?)<\/title>/i);
-          const metaMatch = html.match(/<meta\s+name="description"\s+content="([^"]*)"/i);
-          const title = decodeHtmlEntities(titleMatch?.[1] || "");
-          const description = decodeHtmlEntities(metaMatch?.[1] || "");
-          const text = `${title}\n${description}\n${stripHtmlText(html)}`.replace(/\s+/g, " ").trim();
-          notices.push({ url, text });
-        } catch (error) {
-          attempts.push({
-            step: "notice_detail",
-            url,
-            ok: false,
-            error: String(error?.message || error),
-          });
+        const cached = cache.byCoin.get(upperCoin);
+        if (cached) {
+          return {
+            coin: upperCoin,
+            attempts: cache.attempts || [],
+            parsed: true,
+            matchedCount: cached?.networks?.length || 0,
+            normalizedResult: cached,
+            error: null,
+          };
         }
       }
 
-      const networksMap = new Map();
-      let matchedCount = 0;
-      for (const notice of notices) {
-        const parsed = parseUpbitNoticeForCoin(notice.text, upperCoin);
-        if (!parsed) continue;
-        matchedCount += 1;
-        const key = parsed.network;
-        const existing = networksMap.get(key) || { network: key, deposit: null, withdraw: null };
-        if (parsed.deposit !== null) existing.deposit = parsed.deposit;
-        if (parsed.withdraw !== null) existing.withdraw = parsed.withdraw;
-        networksMap.set(key, existing);
+      const notices = [];
+      try {
+        const listUrl = "https://global-docs.upbit.com/changelog";
+        const listResponse = await fetch(listUrl, { headers: { "user-agent": "kimchi-kimp-worker/1.0" } });
+        const listText = await listResponse.text();
+        attempts.push({
+          step: "changelog_list",
+          url: listUrl,
+          status: listResponse.status,
+          ok: listResponse.ok,
+          preview: String(listText || "").slice(0, 200),
+        });
+        if (listResponse.ok) {
+          const linkMatches = Array.from(String(listText).matchAll(/href="(\/changelog\/[^"]+)"/g))
+            .map((m) => m[1])
+            .filter(Boolean);
+          const links = [...new Set(linkMatches)].slice(0, 40).map((path) => `https://global-docs.upbit.com${path}`);
+          for (const url of links) {
+            try {
+              const response = await fetch(url, { headers: { "user-agent": "kimchi-kimp-worker/1.0" } });
+              const html = await response.text();
+              attempts.push({ step: "notice_detail", url, status: response.status, ok: response.ok });
+              if (!response.ok) continue;
+              const titleMatch = html.match(/<title>(.*?)<\/title>/i);
+              const metaMatch = html.match(/<meta\s+name="description"\s+content="([^"]*)"/i);
+              const title = decodeHtmlEntities(titleMatch?.[1] || "");
+              const description = decodeHtmlEntities(metaMatch?.[1] || "");
+              const body = stripHtmlText(html);
+              const text = `${title}\n${description}\n${body}`.replace(/\s+/g, " ").trim();
+              notices.push({ url, title, body, text, noticeAt: null });
+            } catch (error) {
+              attempts.push({
+                step: "notice_detail",
+                url,
+                ok: false,
+                error: String(error?.message || error),
+              });
+            }
+          }
+        }
+      } catch (error) {
+        attempts.push({ step: "changelog_fetch", ok: false, error: String(error?.message || error) });
       }
 
-      const networks = Array.from(networksMap.values())
-        .filter((n) => n.deposit !== null || n.withdraw !== null)
-        .map((n) => ({
-          network: n.network,
-          deposit: n.deposit === true,
-          withdraw: n.withdraw === true,
-        }));
+      // Upbit KR support notices (announcement/help-center source).
+      for (let page = 1; page <= 8; page += 1) {
+        const listUrl = `https://support.upbit.com/api/v2/help_center/ko/articles.json?per_page=100&page=${page}`;
+        try {
+          const response = await fetch(listUrl, { headers: { "user-agent": "kimchi-kimp-worker/1.0" } });
+          const text = await response.text();
+          attempts.push({ step: "support_articles", url: listUrl, status: response.status, ok: response.ok });
+          if (!response.ok) break;
+          let parsed = null;
+          try {
+            parsed = JSON.parse(text);
+          } catch (error) {
+            attempts.push({
+              step: "support_articles_parse",
+              url: listUrl,
+              ok: false,
+              error: String(error?.message || error),
+            });
+          }
+          const articles = Array.isArray(parsed?.articles) ? parsed.articles : [];
+          if (!articles.length) break;
+          for (const article of articles) {
+            const title = String(article?.title || "");
+            const body = stripHtmlText(article?.body || "");
+            const articleText = `${title}\n${body}`.replace(/\s+/g, " ").trim();
+            if (articleText) {
+              notices.push({
+                url: article?.html_url || listUrl,
+                title,
+                body,
+                text: articleText,
+                noticeAt: article?.created_at || article?.updated_at || null,
+              });
+            }
+          }
+          if (!parsed?.next_page) break;
+        } catch (error) {
+          attempts.push({ step: "support_articles", url: listUrl, ok: false, error: String(error?.message || error) });
+          break;
+        }
+      }
+
+      const aliases = buildCoinAliases(upperCoin, this.upbitNames.get(upperCoin));
+      const events = [];
+      for (const notice of notices) {
+        if (!hasWalletKeywords(notice.text)) continue;
+        const event = parseUpbitNoticeEventForCoin(notice, upperCoin, aliases);
+        if (event) events.push(event);
+      }
+
+      const latestByNetwork = new Map();
+      for (const event of events) {
+        const key = `${event.network || upperCoin}`;
+        const prev = latestByNetwork.get(key);
+        const currentTs = Date.parse(event.startAt || "") || Date.parse(event.noticeAt || "") || 0;
+        const prevTs = prev ? (Date.parse(prev.startAt || "") || Date.parse(prev.noticeAt || "") || 0) : -1;
+        if (!prev || currentTs >= prevTs) {
+          latestByNetwork.set(key, event);
+        }
+      }
+
+      const networks = Array.from(latestByNetwork.values()).map((event) => ({
+        network: event.network || upperCoin,
+        deposit: event.deposit === true,
+        withdraw: event.withdraw === true,
+      }));
 
       const normalizedResult = networks.length
         ? {
@@ -405,9 +457,25 @@ export class KimpHub {
             withdraw: networks.some((n) => n.withdraw === true),
             deposit_enabled: networks.some((n) => n.deposit === true),
             withdraw_enabled: networks.some((n) => n.withdraw === true),
+            summary: {
+              deposit: networks.some((n) => n.deposit === true),
+              withdraw: networks.some((n) => n.withdraw === true),
+            },
             networks,
+            source: "upbit-notice-parser",
+            events,
           }
-        : null;
+        : {
+            exchange: "upbit",
+            deposit: true,
+            withdraw: true,
+            deposit_enabled: true,
+            withdraw_enabled: true,
+            summary: { deposit: true, withdraw: true },
+            networks: [],
+            source: "default-open",
+            events: [],
+          };
 
       const byCoin = new Map();
       if (normalizedResult) byCoin.set(upperCoin, normalizedResult);
@@ -421,9 +489,9 @@ export class KimpHub {
         coin: upperCoin,
         attempts,
         parsed: true,
-        matchedCount,
+        matchedCount: events.length,
         normalizedResult,
-        error: normalizedResult ? null : "No matching Upbit notice for coin",
+        error: null,
       };
     } catch (error) {
       attempts.push({ step: "upbit_notice_parse", ok: false, error: String(error?.message || error) });
@@ -506,7 +574,6 @@ export class KimpHub {
 
     this.assetCollectorsRunning = (async () => {
       await Promise.allSettled([
-        this.collectUpbitAssetStatus(),
         this.collectBinanceAssetStatus(),
         this.collectBybitAssetStatus(),
         this.collectOkxAssetStatus(),
@@ -724,14 +791,11 @@ export class KimpHub {
     const status = byCoin.get(coin);
     if (status) return status;
 
-    if (exchange === "upbit" && (!this.env.UPBIT_ACCESS_KEY || !this.env.UPBIT_SECRET_KEY)) {
-      return this.unavailableExchangeStatus("upbit", "AUTH_REQUIRED");
-    }
     if (exchange === "bybit" && (!this.env.BYBIT_API_KEY || !this.env.BYBIT_SECRET_KEY)) {
-      return this.unavailableExchangeStatus("bybit", "AUTH_REQUIRED");
+      return this.unavailableExchangeStatus("bybit", "NO_PUBLIC_WALLET_API");
     }
     if (exchange === "okx" && (!this.env.OKX_API_KEY || !this.env.OKX_SECRET_KEY || !this.env.OKX_PASSPHRASE)) {
-      return this.unavailableExchangeStatus("okx", "AUTH_REQUIRED");
+      return this.unavailableExchangeStatus("okx", "NO_PUBLIC_WALLET_API");
     }
 
     return this.unavailableExchangeStatus(exchange, "NOT_LISTED");
@@ -828,35 +892,472 @@ function stripHtmlText(html) {
     .trim();
 }
 
-function parseUpbitNoticeForCoin(text, coin) {
-  const raw = String(text || "");
-  if (!raw) return null;
-  const upper = raw.toUpperCase();
+function hasWalletKeywords(text) {
+  return /(입출금|입금|출금|중단|재개|거래\s*유의|거래지원\s*종료|네트워크|점검|업그레이드|하드포크|notice|deposit|withdraw|maintenance|upgrade|hard\s*fork|suspend|resume|delist)/i.test(
+    String(text || "")
+  );
+}
+
+function hasNoticeLikeContext(text) {
+  return /(안내|공지|입출금|입금|출금|중단|재개|거래\s*유의|거래지원\s*종료|하드포크|업그레이드|점검|상태|status)/i.test(
+    String(text || "")
+  );
+}
+
+function isNoticeTitleRelevant(title) {
+  return /(입출금|입금|출금|중단|재개|거래\s*유의|거래지원\s*종료|점검|업그레이드|하드포크|suspend|resume|maintenance|upgrade|hard\s*fork|delist)/i.test(
+    String(title || "")
+  );
+}
+
+function parseUpbitNoticeEventForCoin(notice, coin, aliases = []) {
   const symbol = String(coin || "").toUpperCase();
-  const coinRegex = new RegExp(`(^|[^A-Z0-9])${symbol}([^A-Z0-9]|$)`);
-  if (!coinRegex.test(upper)) return null;
+  const title = String(notice?.title || "");
+  const body = String(notice?.body || "");
+  const text = `${title}\n${body}\n${notice?.text || ""}`;
+  const upper = text.toUpperCase();
+  const aliasTokens = aliases
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  const hasSymbolToken = new RegExp(`(^|[^A-Z0-9])${symbol}([^A-Z0-9]|$)`, "i").test(upper);
+  const hasAlias = aliasTokens.some((token) => {
+    if (!token) return false;
+    if (/^[A-Z0-9]{2,15}$/i.test(token)) {
+      return new RegExp(`(^|[^A-Z0-9])${token.toUpperCase()}([^A-Z0-9]|$)`, "i").test(upper);
+    }
+    return text.includes(token);
+  });
+  if (!hasSymbolToken && !hasAlias) return null;
+  if (!hasWalletKeywords(text) || !hasNoticeLikeContext(text)) return null;
+  const hasScopeToken = /(입출금|입금|출금|deposit|withdraw)/i.test(text);
+  const hasActionToken = /(중단|재개|거래\s*유의|거래지원\s*종료|점검|업그레이드|하드포크|suspend|resume|maintenance|upgrade|hard\s*fork|delist)/i.test(
+    text
+  );
+  if (!hasScopeToken || !hasActionToken) return null;
 
-  const mentionsDeposit = /\bDEPOSIT(S)?\b/i.test(raw);
-  const mentionsWithdraw = /\bWITHDRAW(AL|ALS)?\b/i.test(raw);
-  const mentionsBoth = /\bDEPOSIT(?:S)?\s*(?:AND|\/|&)\s*WITHDRAW(?:AL|ALS)?\b/i.test(raw);
-  const hasActionWord = /(SUSPEND|SUSPENSION|PAUSE|PAUSED|MAINTENANCE|RESUME|RESUMED|REOPEN|REOPENED|RESTORED|NORMALIZED)/i.test(raw);
-  if (!hasActionWord || (!mentionsDeposit && !mentionsWithdraw && !mentionsBoth)) return null;
+  const scope = extractWalletScope(text);
+  const action = extractWalletAction(text);
+  if (!scope || !action) return null;
 
-  const lowered = raw.toLowerCase();
-  const suspendIdx = lowered.search(/suspend|suspension|pause|paused|maintenance|halt|disable|unavailable/);
-  const resumeIdx = lowered.search(/resume|resumed|reopen|reopened|restored|normaliz/);
-  let state = null;
-  if (suspendIdx >= 0 && resumeIdx >= 0) state = resumeIdx > suspendIdx ? true : false;
-  else if (resumeIdx >= 0) state = true;
-  else if (suspendIdx >= 0) state = false;
-  if (state === null) return null;
+  let deposit = true;
+  let withdraw = true;
+  if (action === "suspend") {
+    if (scope === "both") {
+      deposit = false;
+      withdraw = false;
+    } else if (scope === "deposit") {
+      deposit = false;
+      withdraw = true;
+    } else if (scope === "withdraw") {
+      deposit = true;
+      withdraw = false;
+    }
+  } else if (action === "resume") {
+    // Resume notices are treated as open state.
+    deposit = true;
+    withdraw = true;
+  } else if (action === "warning") {
+    // 거래유의 지정 시 기본적으로 입금 중단 취급.
+    deposit = false;
+    withdraw = true;
+  } else if (action === "delist") {
+    deposit = false;
+    withdraw = true;
+    const withdrawalDeadline = extractWithdrawalDeadline(text);
+    if (withdrawalDeadline && Date.now() > Date.parse(withdrawalDeadline)) {
+      withdraw = false;
+    }
+  }
 
-  const networkMatch = raw.match(/\b(ERC20|TRC20|BEP20|KIP7|SPL|ETH|XRP|BTC|SOL|ARB|OPTIMISM|OP|BASE|POLYGON|MATIC|AVAX|TON|APTOS|SUI|NEAR|OMNI)\b/i);
-  const network = String(networkMatch?.[1] || symbol).toUpperCase();
+  const reason = extractWalletReason(text);
+  const effectiveAt = extractNoticeStartAt(text);
+  const network = extractNetworkName(text, symbol);
 
-  const deposit = (mentionsDeposit || mentionsBoth) ? state : null;
-  const withdraw = (mentionsWithdraw || mentionsBoth) ? state : null;
-  return { network, deposit, withdraw };
+  return {
+    exchange: "upbit",
+    assets: [symbol],
+    network,
+    scope,
+    action,
+    deposit,
+    withdraw,
+    reason,
+    effectiveAt: effectiveAt || null,
+    noticeAt: notice?.noticeAt || null,
+    title,
+    url: notice?.url || null,
+    source: "upbit-notice",
+  };
+}
+
+function extractWalletScope(text) {
+  const raw = String(text || "");
+  if (/(입출금|입금\/출금|deposit\s*(?:and|\/|&)\s*withdraw|deposits?\s*(?:and|\/|&)\s*withdrawals?)/i.test(raw)) return "both";
+  const hasDeposit = /(입금|deposits?)/i.test(raw);
+  const hasWithdraw = /(출금|withdraw(?:al|als)?)/i.test(raw);
+  if (hasDeposit && hasWithdraw) return "both";
+  if (hasDeposit) return "deposit";
+  if (hasWithdraw) return "withdraw";
+  return null;
+}
+
+function extractWalletAction(text) {
+  const raw = String(text || "");
+  if (/(거래\s*유의|유의\s*종목)/i.test(raw)) return "warning";
+  if (/(거래지원\s*종료|상장\s*폐지|delist|termination of trading support)/i.test(raw)) return "delist";
+  const suspendIdx = raw.search(/중단|점검|불가|정지|suspend|suspension|pause|paused|maintenance|halt|disable|unavailable/i);
+  const resumeIdx = raw.search(/재개|정상화|해제|resume|resumed|reopen|reopened|restored|enabled/i);
+  if (suspendIdx >= 0 && resumeIdx >= 0) return resumeIdx > suspendIdx ? "resume" : "suspend";
+  if (resumeIdx >= 0) return "resume";
+  if (suspendIdx >= 0) return "suspend";
+  return null;
+}
+
+function extractWalletReason(text) {
+  const raw = String(text || "");
+  if (/거래\s*유의|warning/i.test(raw)) return "warning";
+  if (/거래지원\s*종료|delist/i.test(raw)) return "delist";
+  if (/하드포크|hard\s*fork/i.test(raw)) return "hardfork";
+  if (/업그레이드|upgrade/i.test(raw)) return "upgrade";
+  if (/점검|maintenance/i.test(raw)) return "maintenance";
+  if (/네트워크|network/i.test(raw)) return "network";
+  return "notice";
+}
+
+function extractNoticeStartAt(text) {
+  const raw = String(text || "");
+  const isoMatch = raw.match(/\b(20\d{2})[-./](\d{1,2})[-./](\d{1,2})\s+(\d{1,2}):(\d{2})/);
+  if (isoMatch) {
+    const [, y, m, d, hh, mm] = isoMatch;
+    return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}T${String(hh).padStart(2, "0")}:${mm}:00+09:00`;
+  }
+
+  const koMatch = raw.match(/(20\d{2})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일\s*(\d{1,2})\s*[:시]\s*(\d{1,2})?/);
+  if (koMatch) {
+    const [, y, m, d, hh, mmRaw] = koMatch;
+    const mm = String(mmRaw || "00").padStart(2, "0");
+    return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}T${String(hh).padStart(2, "0")}:${mm}:00+09:00`;
+  }
+  return null;
+}
+
+function extractNetworkName(text, symbol) {
+  const raw = String(text || "");
+  const direct = raw.match(/\b(ERC20|TRC20|BEP20|KIP7|SPL|ETH|XRP|BTC|SOL|ARB|ARBITRUM|OPTIMISM|OP|BASE|POLYGON|MATIC|AVAX|TON|APTOS|SUI|NEAR|OMNI)\b/i);
+  if (direct?.[1]) return String(direct[1]).toUpperCase();
+  const koNetwork = raw.match(/([가-힣A-Za-z0-9]+)\s*네트워크/);
+  if (koNetwork?.[1]) return String(koNetwork[1]).toUpperCase();
+  return String(symbol || "").toUpperCase();
+}
+
+function extractWithdrawalDeadline(text) {
+  const raw = String(text || "");
+  const iso = raw.match(/출금(?:지원)?\s*종료[^0-9]*(20\d{2})[-./](\d{1,2})[-./](\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?/);
+  if (iso) {
+    const [, y, m, d, hhRaw, mmRaw] = iso;
+    const hh = String(hhRaw || "00").padStart(2, "0");
+    const mm = String(mmRaw || "00").padStart(2, "0");
+    return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}T${hh}:${mm}:00+09:00`;
+  }
+  return null;
+}
+
+function buildCoinAliases(symbol, displayName) {
+  const out = new Set();
+  const upperSymbol = String(symbol || "").toUpperCase();
+  if (upperSymbol) out.add(upperSymbol);
+
+  const name = String(displayName || "").trim();
+  if (name) {
+    out.add(name);
+    const compact = name.replace(/\s+/g, "");
+    if (compact) out.add(compact);
+  }
+
+  const aliasMap = {
+    BTC: ["비트코인", "Bitcoin"],
+    ETH: ["이더리움", "Ethereum"],
+    XRP: ["리플", "엑스알피", "Ripple"],
+    SOL: ["솔라나", "Solana"],
+    ADA: ["에이다", "Cardano"],
+    TRX: ["트론", "Tron"],
+    DOGE: ["도지", "도지코인", "Dogecoin"],
+    USDT: ["테더", "Tether"],
+    USDC: ["USD코인", "유에스디코인", "USD Coin"],
+    BCH: ["비트코인캐시", "Bitcoin Cash"],
+    ETC: ["이더리움클래식", "Ethereum Classic"],
+    LINK: ["체인링크", "Chainlink"],
+    DOT: ["폴카닷", "Polkadot"],
+    AVAX: ["아발란체", "Avalanche"],
+    SUI: ["수이", "Sui"],
+    APT: ["앱토스", "Aptos"],
+    TON: ["톤", "Toncoin"],
+    FLOW: ["플로우", "Flow"],
+    STX: ["스택스", "Stacks"],
+    XLM: ["스텔라", "Stellar"],
+    EOS: ["이오스", "Eos"],
+  };
+  const extras = aliasMap[upperSymbol] || [];
+  extras.forEach((item) => {
+    out.add(item);
+    const compact = String(item || "").replace(/\s+/g, "");
+    if (compact) out.add(compact);
+  });
+
+  return Array.from(out);
+}
+
+async function collectUpbitNoticeDocuments() {
+  const cached = getCachedValue("src:upbit:notice-docs");
+  if (cached?.documents) return cached;
+
+  const attempts = [];
+  const documents = [];
+  const seen = new Set();
+  const pushDoc = (doc) => {
+    const url = String(doc?.url || "");
+    const title = String(doc?.title || "");
+    const body = String(doc?.body || "");
+    const text = `${title}\n${body}`.replace(/\s+/g, " ").trim();
+    if (!text) return;
+    const key = `${url}::${title}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    documents.push({
+      url,
+      title,
+      body,
+      text,
+      noticeAt: doc?.noticeAt || null,
+      source: doc?.source || "unknown",
+    });
+  };
+
+  // Upbit KR wallet status landing page: extract linked notice IDs when present.
+  try {
+    const walletStatusUrl = "https://upbit.com/service_center/wallet_status";
+    const response = await fetch(walletStatusUrl, { headers: { "user-agent": "kimchi-kimp-worker/1.0" } });
+    const html = await response.text();
+    attempts.push({ step: "wallet_status_page", url: walletStatusUrl, status: response.status, ok: response.ok });
+    if (response.ok) {
+      const ids = Array.from(String(html).matchAll(/service_center\/notice\?id=(\d+)/g))
+        .map((m) => Number(m[1]))
+        .filter((id) => Number.isFinite(id))
+        .slice(0, 60);
+      const uniqIds = [...new Set(ids)];
+      for (const id of uniqIds) {
+        const url = `https://upbit.com/service_center/notice?id=${id}`;
+        pushDoc({
+          url,
+          title: `업비트 공지 ${id}`,
+          body: `업비트 공지 링크 id=${id}`,
+          noticeAt: null,
+          source: "upbit-wallet-status-links",
+        });
+      }
+    }
+  } catch (error) {
+    attempts.push({ step: "wallet_status_page", ok: false, error: String(error?.message || error) });
+  }
+
+  try {
+    const listUrl = "https://global-docs.upbit.com/changelog";
+    const listResponse = await fetch(listUrl, { headers: { "user-agent": "kimchi-kimp-worker/1.0" } });
+    const listText = await listResponse.text();
+    attempts.push({ step: "changelog_list", url: listUrl, status: listResponse.status, ok: listResponse.ok });
+    if (listResponse.ok) {
+      const linkMatches = Array.from(String(listText).matchAll(/href="(\/changelog\/[^"]+)"/g))
+        .map((m) => m[1])
+        .filter(Boolean);
+      const links = [...new Set(linkMatches)].slice(0, 60).map((path) => `https://global-docs.upbit.com${path}`);
+      for (const url of links) {
+        try {
+          const response = await fetch(url, { headers: { "user-agent": "kimchi-kimp-worker/1.0" } });
+          const html = await response.text();
+          attempts.push({ step: "notice_detail", url, status: response.status, ok: response.ok });
+          if (!response.ok) continue;
+          const titleMatch = html.match(/<title>(.*?)<\/title>/i);
+          const metaMatch = html.match(/<meta\s+name="description"\s+content="([^"]*)"/i);
+          const title = decodeHtmlEntities(titleMatch?.[1] || "");
+          const description = decodeHtmlEntities(metaMatch?.[1] || "");
+          const body = stripHtmlText(html);
+          pushDoc({
+            url,
+            title,
+            body: `${description}\n${body}`.trim(),
+            noticeAt: null,
+            source: "upbit-global-changelog",
+          });
+        } catch (error) {
+          attempts.push({ step: "notice_detail", url, ok: false, error: String(error?.message || error) });
+        }
+      }
+    }
+  } catch (error) {
+    attempts.push({ step: "changelog_fetch", ok: false, error: String(error?.message || error) });
+  }
+
+  for (let page = 1; page <= 8; page += 1) {
+    const listUrl = `https://support.upbit.com/api/v2/help_center/ko/articles.json?per_page=100&page=${page}`;
+    try {
+      const response = await fetch(listUrl, { headers: { "user-agent": "kimchi-kimp-worker/1.0" } });
+      const text = await response.text();
+      attempts.push({ step: "support_articles", url: listUrl, status: response.status, ok: response.ok });
+      if (!response.ok) break;
+      const parsed = JSON.parse(text);
+      const articles = Array.isArray(parsed?.articles) ? parsed.articles : [];
+      if (!articles.length) break;
+      for (const article of articles) {
+        const title = String(article?.title || "");
+        const body = stripHtmlText(article?.body || "");
+        pushDoc({
+          url: article?.html_url || listUrl,
+          title,
+          body,
+          noticeAt: article?.created_at || article?.updated_at || null,
+          source: "upbit-support",
+        });
+      }
+      if (!parsed?.next_page) break;
+    } catch (error) {
+      attempts.push({ step: "support_articles", url: listUrl, ok: false, error: String(error?.message || error) });
+      break;
+    }
+  }
+
+  return setCachedValue("src:upbit:notice-docs", { documents, attempts }, COLLECTOR_INTERVAL_MS);
+}
+
+async function getUpbitCoinDisplayName(symbol) {
+  const upper = String(symbol || "").toUpperCase();
+  if (!upper) return "";
+  const cacheKey = "src:upbit:krw-name-map";
+  const cached = getCachedValue(cacheKey);
+  if (cached && typeof cached === "object") {
+    return String(cached[upper] || "");
+  }
+  try {
+    const markets = await fetchJson("https://api.upbit.com/v1/market/all?isDetails=false");
+    const map = {};
+    (markets || []).forEach((item) => {
+      const market = String(item?.market || "");
+      if (!market.startsWith("KRW-")) return;
+      const key = market.split("-")[1];
+      if (!key) return;
+      map[String(key).toUpperCase()] = String(item?.korean_name || key);
+    });
+    setCachedValue(cacheKey, map, COLLECTOR_INTERVAL_MS);
+    return String(map[upper] || "");
+  } catch (_error) {
+    return "";
+  }
+}
+
+async function fetchUpbitNoticeStatus(symbol) {
+  const upperSymbol = String(symbol || "").toUpperCase();
+  const docs = await collectUpbitNoticeDocuments();
+  const displayName = await getUpbitCoinDisplayName(upperSymbol);
+  const aliases = buildCoinAliases(upperSymbol, displayName);
+  const events = [];
+  const matchedNotices = [];
+  for (const doc of docs.documents || []) {
+    if (doc?.source === "upbit-support" && !isNoticeTitleRelevant(doc?.title)) continue;
+    if (!hasWalletKeywords(doc.text)) continue;
+    if (!hasNoticeLikeContext(doc.text)) continue;
+    const event = parseUpbitNoticeEventForCoin(doc, upperSymbol, aliases);
+    if (event) {
+      events.push(event);
+      matchedNotices.push({
+        title: doc.title,
+        url: doc.url || null,
+        noticeAt: doc.noticeAt || null,
+        source: doc.source || null,
+      });
+    }
+  }
+
+  const latestByNetwork = new Map();
+  for (const event of events) {
+    const key = `${event.network || upperSymbol}`;
+    const prev = latestByNetwork.get(key);
+    const currentTs = Date.parse(event.effectiveAt || "") || Date.parse(event.noticeAt || "") || 0;
+    const prevTs = prev ? (Date.parse(prev.effectiveAt || "") || Date.parse(prev.noticeAt || "") || 0) : -1;
+    if (!prev || currentTs >= prevTs) latestByNetwork.set(key, event);
+  }
+  const networks = Array.from(latestByNetwork.values()).map((event) => ({
+    network: event.network || upperSymbol,
+    deposit: typeof event.deposit === "boolean" ? event.deposit : true,
+    withdraw: typeof event.withdraw === "boolean" ? event.withdraw : true,
+  }));
+  if (!networks.length) {
+    return {
+      exchange: "upbit",
+      label: exchangeLabel("upbit"),
+      deposit: true,
+      withdraw: true,
+      summary: { deposit: true, withdraw: true },
+      networks: [],
+      source: "default-open",
+      debug: {
+        noticesChecked: (docs.documents || []).length,
+        noMatchingNotice: true,
+      },
+    };
+  }
+
+  const finalStatus = {
+    exchange: "upbit",
+    label: exchangeLabel("upbit"),
+    deposit: networks.some((n) => n.deposit === true),
+    withdraw: networks.some((n) => n.withdraw === true),
+    summary: summarizeNetworks(networks),
+    networks,
+    source: "upbit-notice-parser",
+    reason: events[0]?.reason || null,
+    title: events[0]?.title || null,
+    url: events[0]?.url || null,
+  };
+  finalStatus._debug = {
+    noticesChecked: (docs.documents || []).length,
+    matchedNotices,
+    normalizedEvents: events,
+  };
+  return finalStatus;
+}
+
+async function getUpbitNoticeStatusDebug(symbol) {
+  const upperSymbol = String(symbol || "").toUpperCase();
+  const docs = await collectUpbitNoticeDocuments();
+  const displayName = await getUpbitCoinDisplayName(upperSymbol);
+  const aliases = buildCoinAliases(upperSymbol, displayName);
+  const matchedNotices = [];
+  const events = [];
+  for (const doc of docs.documents || []) {
+    if (doc?.source === "upbit-support" && !isNoticeTitleRelevant(doc?.title)) continue;
+    if (!hasWalletKeywords(doc.text)) continue;
+    if (!hasNoticeLikeContext(doc.text)) continue;
+    const event = parseUpbitNoticeEventForCoin(doc, upperSymbol, aliases);
+    if (event) {
+      events.push(event);
+      matchedNotices.push({
+        title: doc.title,
+        url: doc.url || null,
+        noticeAt: doc.noticeAt || null,
+        source: doc.source || null,
+      });
+    }
+  }
+  const status = await fetchUpbitNoticeStatus(upperSymbol);
+  const finalStatus = { ...status };
+  delete finalStatus._debug;
+  return {
+    coin: upperSymbol,
+    noticesChecked: (docs.documents || []).length,
+    matchedNotices,
+    normalizedEvents: events,
+    finalStatus,
+    attempts: docs.attempts || [],
+  };
 }
 
 async function decodeWsMessage(data) {
@@ -971,7 +1472,6 @@ async function ensureAssetCollectors(env) {
       collectBithumbAll(),
       collectCoinoneAll(),
       collectGateStatic(),
-      collectUpbitAll(env),
       collectOkxAll(env),
       collectBybitAll(env),
     ];
@@ -1241,19 +1741,13 @@ async function fetchCoinoneAssetStatus(symbol) {
 }
 
 async function fetchUpbitAssetStatus(symbol, env) {
-  if (!env.UPBIT_ACCESS_KEY || !env.UPBIT_SECRET_KEY) {
-    return unavailableExchangeStatus("upbit", "AUTH_REQUIRED");
-  }
-  const all = getCachedValue("src:upbit:all") || {};
-  if (all[symbol]) return all[symbol];
-  const upbitErr = getCachedValue("src:upbit:error");
-  if (upbitErr?.code) return unavailableExchangeStatus("upbit", upbitErr.code);
-  return unavailableExchangeStatus("upbit", "NOT_LISTED");
+  void env;
+  return fetchUpbitNoticeStatus(symbol);
 }
 
 async function fetchOkxAssetStatus(symbol, env) {
   if (!env.OKX_API_KEY || !env.OKX_SECRET_KEY || !env.OKX_PASSPHRASE) {
-    return unavailableExchangeStatus("okx", "AUTH_REQUIRED");
+    return unavailableExchangeStatus("okx", "NO_PUBLIC_WALLET_API");
   }
   const all = getCachedValue("src:okx:all") || {};
   return all[symbol] || unavailableExchangeStatus("okx", "NOT_LISTED");
@@ -1261,7 +1755,7 @@ async function fetchOkxAssetStatus(symbol, env) {
 
 async function fetchBybitAssetStatus(symbol, env) {
   if (!env.BYBIT_API_KEY || !env.BYBIT_SECRET_KEY) {
-    return unavailableExchangeStatus("bybit", "AUTH_REQUIRED");
+    return unavailableExchangeStatus("bybit", "NO_PUBLIC_WALLET_API");
   }
   const all = getCachedValue("src:bybit:all") || {};
   return all[symbol] || unavailableExchangeStatus("bybit", "NOT_LISTED");
