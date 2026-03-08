@@ -3,80 +3,79 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Crypto Dashboard</title>
-    <link href="/style.css" rel="stylesheet">
+    <title>코프가 | 실시간 김치 프리미엄 대시보드</title>
+    <meta name="description" content="코프가 실시간 김치 프리미엄 대시보드. 국내·해외 거래소 가격 괴리, USDT 환율, 상위 기회 종목, 입출금 상태를 한 화면에서 확인하세요." />
+    <meta name="keywords" content="김치프리미엄, 김프, 코프가, 아비트라지, 업비트, 바이낸스, USDT" />
+    <meta property="og:title" content="코프가 | 실시간 김치 프리미엄 대시보드" />
+    <meta property="og:description" content="국내·해외 거래소 가격 괴리, USDT 환율, 상위 기회 종목을 한 화면에서 확인하세요." />
+    <meta property="og:type" content="website" />
+    <link href="/style.css" rel="stylesheet" />
     <script src="https://s3.tradingview.com/tv.js"></script>
 </head>
 <body>
-    <div class="dashboard">
-        <aside class="sidebar">
-             <div class="sidebar-header">
-                <h2>코프가</h2>
+    <div class="app-shell">
+        <header class="hero-panel">
+            <div class="brand-block">
+                <div class="brand">코프가</div>
+                <h1>실시간 김치 프리미엄 대시보드</h1>
+                <p>국내·해외 거래소 가격 괴리, USDT 환율, 상위 기회 종목을 한 화면에서 확인하세요.</p>
             </div>
-            <nav class="sidebar-nav">
-                <h3>프리미엄</h3>
-                <ul>
-                    <li><a href="#" class="active" data-category="kimp">김치 프리미엄</a></li>
-                    <li><a href="#" data-category="domestic-premium">국내 프리미엄</a></li>
-                    <li><a href="#" data-category="us-premium">US 해외 프리미엄</a></li>
-                </ul>
-                <h3>아비트라지</h3>
-                 <ul>
-                    <li><a href="#" data-category="arbitrage">아비트라지</a></li>
-                    <li><a href="#" data-category="funding-arbitrage">펀비 아비트라지</a></li>
-                    <li><a href="#" data-category="funding-live">실시간 펀비</a></li>
-                    <li><a href="#" data-category="funding-cumulative">누적 펀비</a></li>
-                    <li><a href="#" data-category="gap-chart">더따리 갭차트</a></li>
-                </ul>
-                <h3>Payback</h3>
-                <ul>
-                    <li><a href="#" data-category="payback">거래소 페이백</a></li>
-                </ul>
-                <h3>트렌드</h3>
-                <ul>
-                    <li><a href="#" data-category="trend">실시간 트렌드</a></li>
-                </ul>
-                <h3>코인 이벤트</h3>
-                <ul>
-                    <li><a href="#" data-category="events">이벤트 일정</a></li>
-                </ul>
-                <h3>코인 정보</h3>
-                <ul>
-                    <li><a href="#" data-category="coin-info">종목 정보</a></li>
-                </ul>
-            </nav>
-        </aside>
-        <main class="main-content">
-            <header class="main-header">
-                <div class="header-card">
-                    <p>테더 김프</p>
-                    <span>-1.22%</span>
+            <div class="hero-status">
+                <div class="live-wrap">
+                    <span id="live-badge" class="live-badge">LIVE</span>
+                    <span class="status-text">실시간 스트림 연결</span>
                 </div>
-                <div class="header-card">
-                    <p>USDT/KRW</p>
-                    <span>1,486</span>
+                <div class="status-line">마지막 업데이트 <strong id="last-updated">-</strong></div>
+                <div class="exchange-select-group compact">
+                    <label for="refresh-interval-select">새로고침 주기</label>
+                    <select id="refresh-interval-select">
+                        <option value="1000">1초</option>
+                        <option value="2000" selected>2초 (기본)</option>
+                        <option value="3000">3초</option>
+                        <option value="5000">5초</option>
+                    </select>
                 </div>
-                 <div class="header-card">
-                    <p>업비트 USDT</p>
-                    <span>1,468</span>
+            </div>
+        </header>
+
+        <section class="kpi-grid">
+            <article class="kpi-card">
+                <span class="kpi-label">테더 김프</span>
+                <strong id="kpi-tether-gimp" class="kpi-value">-</strong>
+            </article>
+            <article class="kpi-card">
+                <span class="kpi-label">USDT/KRW</span>
+                <strong id="kpi-usdkrw" class="kpi-value">-</strong>
+            </article>
+            <article class="kpi-card">
+                <span class="kpi-label">업비트 USDT</span>
+                <strong id="kpi-upbit-usdt" class="kpi-value">-</strong>
+            </article>
+            <article class="kpi-card">
+                <span class="kpi-label">빗썸 USDT</span>
+                <strong id="kpi-bithumb-usdt" class="kpi-value">-</strong>
+            </article>
+            <article class="kpi-card">
+                <span class="kpi-label">실시간 추적 종목 수</span>
+                <strong id="kpi-tracked-count" class="kpi-value">-</strong>
+            </article>
+            <article class="kpi-card">
+                <span class="kpi-label">선택 거래소 조합</span>
+                <strong id="kpi-selected-pair" class="kpi-value kpi-pair">-</strong>
+            </article>
+        </section>
+
+        <section class="panel chart-panel">
+            <div class="section-head">
+                <div>
+                    <h2>김치 프리미엄 흐름</h2>
+                    <p id="selected-exchange-pair" class="selected-exchange-pair">업비트 / 바이낸스 USDT</p>
                 </div>
-                <div class="header-card">
-                    <p>빗썸 USDT</p>
-                    <span>1,467</span>
-                </div>
-            </header>
-            <section class="chart-section">
-                <h2 id="main-section-title">김치 프리미엄</h2>
-                <p id="main-section-description">국내와 해외 거래소의 가격차이를 확인하세요.</p>
-                <p id="active-category-tag" class="active-category-tag">현재 카테고리: 김치 프리미엄</p>
-                <div id="chart-container" style="height: 400px;"></div>
-            </section>
-            <section class="table-section">
-                <div class="table-controls">
+                <div class="control-row">
                     <div class="exchange-select-group">
                         <label for="domestic-exchange">국내 거래소</label>
                         <select id="domestic-exchange">
-                            <option value="upbit">업비트</option>
+                            <option value="upbit" selected>업비트</option>
                             <option value="bithumb">빗썸</option>
                             <option value="coinone">코인원</option>
                             <option value="gopax">고팍스</option>
@@ -97,50 +96,59 @@
                             <option value="gate_perp">gate USDT-PERP</option>
                         </select>
                     </div>
-                    <div class="exchange-select-group">
-                        <label for="refresh-interval-select">업데이트 주기</label>
-                        <select id="refresh-interval-select">
-                            <option value="250">0.25초</option>
-                            <option value="500" selected>0.5초 (기본)</option>
-                            <option value="1000">1초</option>
-                            <option value="2000">2초</option>
-                            <option value="3000">3초</option>
-                            <option value="5000">5초</option>
-                        </select>
-                    </div>
                 </div>
-                <p id="selected-exchange-pair" class="selected-exchange-pair">업비트 / 바이낸스</p>
+            </div>
+            <div id="chart-container" class="chart-container"></div>
+        </section>
+
+        <section class="panel table-panel">
+            <div class="section-head">
+                <div>
+                    <h2>상위 김프 기회</h2>
+                    <p>거래대금 상위 종목 기준으로 실시간 괴리를 정렬해 표시합니다.</p>
+                </div>
+            </div>
+            <div class="table-wrap">
                 <table>
                     <thead>
                         <tr>
-                            <th class="sortable" data-sort-key="name">이름 <span class="sort-indicator"></span></th>
-                            <th class="sortable" data-sort-key="price">현재가 <span class="sort-indicator"></span></th>
+                            <th class="sortable" data-sort-key="name">코인명 <span class="sort-indicator"></span></th>
+                            <th class="sortable" data-sort-key="price">현재가(KRW) <span class="sort-indicator"></span></th>
+                            <th class="sortable" data-sort-key="globalPrice">해외가(USDT) <span class="sort-indicator"></span></th>
                             <th class="sortable" data-sort-key="gimp">김프 <span class="sort-indicator"></span></th>
                             <th class="sortable" data-sort-key="change">전일대비 <span class="sort-indicator"></span></th>
                             <th class="sortable" data-sort-key="volume">거래대금 <span class="sort-indicator"></span></th>
                         </tr>
                     </thead>
                     <tbody id="crypto-table-body">
-                        <tr><td colspan="5">데이터를 불러오는 중...</td></tr>
+                        <tr><td colspan="6">실시간 종목 데이터를 불러오는 중...</td></tr>
                     </tbody>
                 </table>
-            </section>
-            <section id="pair-chart-section" class="pair-chart-section">
-                <h3 id="pair-chart-title">종목 비교 차트</h3>
-                <p id="pair-chart-symbol">종목을 클릭하면 비교 차트가 표시됩니다.</p>
-                <div class="pair-chart-grid">
-                    <div class="pair-chart-box">
-                        <h4>업비트 (KRW)</h4>
-                        <div id="upbit-chart-container" class="pair-chart-container"></div>
-                    </div>
-                    <div class="pair-chart-box">
-                        <h4>바이낸스 (USDT)</h4>
-                        <div id="binance-chart-container" class="pair-chart-container"></div>
-                    </div>
-                </div>
-            </section>
-        </main>
+            </div>
+        </section>
+
+        <section class="foot-cards">
+            <article>
+                <h3>실시간 괴리 추적</h3>
+                <p>WebSocket 스냅샷과 주기적 보강 조회를 결합해 빠르고 안정적인 시세 뷰를 제공합니다.</p>
+            </article>
+            <article>
+                <h3>입출금 상태 확인</h3>
+                <p>종목 행 클릭 시 거래소별 입금/출금 가능 여부와 네트워크 상태를 즉시 확인할 수 있습니다.</p>
+            </article>
+            <article>
+                <h3>아비트라지 판단 보조</h3>
+                <p>국내/해외 가격, 변동률, 거래대금을 한 화면에 정렬해 실행 가능한 기회 탐색을 돕습니다.</p>
+            </article>
+        </section>
+
+        <div class="legacy-hidden" aria-hidden="true">
+            <h2 id="main-section-title">김치 프리미엄</h2>
+            <p id="main-section-description">국내와 해외 거래소의 가격차이를 확인하세요.</p>
+            <p id="active-category-tag">현재 카테고리: 김치 프리미엄</p>
+        </div>
     </div>
-    <script type="module" src="/main.js?v=20260305-2"></script>
+
+    <script type="module" src="/main.js?v=20260308-1"></script>
 </body>
 </html>

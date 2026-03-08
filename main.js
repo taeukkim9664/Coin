@@ -214,15 +214,17 @@ function setActiveCategory(categoryKey) {
     activeCategoryTag.textContent = `현재 카테고리: ${meta.tag}`;
 }
 
-sidebarNav.addEventListener('click', (event) => {
-    const categoryLink = event.target.closest('a[data-category]');
-    if (!categoryLink) return;
+if (sidebarNav) {
+    sidebarNav.addEventListener('click', (event) => {
+        const categoryLink = event.target.closest('a[data-category]');
+        if (!categoryLink) return;
 
-    event.preventDefault();
-    setActiveCategory(categoryLink.dataset.category);
-});
+        event.preventDefault();
+        setActiveCategory(categoryLink.dataset.category);
+    });
 
-setActiveCategory('kimp');
+    setActiveCategory('kimp');
+}
 
 const cryptoTableBody = document.getElementById('crypto-table-body');
 const domesticExchangeSelect = document.getElementById('domestic-exchange');
@@ -230,6 +232,14 @@ const globalExchangeSelect = document.getElementById('global-exchange');
 const refreshIntervalSelect = document.getElementById('refresh-interval-select');
 const selectedExchangePair = document.getElementById('selected-exchange-pair');
 const sortableHeaders = document.querySelectorAll('th.sortable');
+const liveBadge = document.getElementById('live-badge');
+const lastUpdatedLabel = document.getElementById('last-updated');
+const kpiTetherGimp = document.getElementById('kpi-tether-gimp');
+const kpiUsdKrw = document.getElementById('kpi-usdkrw');
+const kpiUpbitUsdt = document.getElementById('kpi-upbit-usdt');
+const kpiBithumbUsdt = document.getElementById('kpi-bithumb-usdt');
+const kpiTrackedCount = document.getElementById('kpi-tracked-count');
+const kpiSelectedPair = document.getElementById('kpi-selected-pair');
 
 const domesticExchangeMeta = {
     upbit: { label: '업비트' },
@@ -258,13 +268,20 @@ const tableState = {
     selectedSymbol: null,
     globalExchangeLabel: '바이낸스',
     detailInterval: '60',
+    openSymbol: null,
+};
+const detailChartRenderState = {
+    symbol: null,
+    domestic: null,
+    foreign: null,
+    interval: null,
 };
 let latestRequestId = 0;
 let cachedSymbolNames = null;
 const blockedDomesticExchanges = new Set();
 const blockedGlobalExchanges = new Set();
 const blockedRateSources = new Set();
-const DEFAULT_REFRESH_MS = 500;
+const DEFAULT_REFRESH_MS = 2000;
 const INITIAL_ERROR_DELAY_ATTEMPTS = 4;
 let liveRefreshTimer = null;
 let isRefreshing = false;
@@ -347,6 +364,10 @@ function toWsBaseFromHttpBase(httpBase) {
 const API_BASE = 'https://kimchi-kimp-worker.taeukkim9664.workers.dev';
 const WS_BASE = 'wss://kimchi-kimp-worker.taeukkim9664.workers.dev';
 
+function baseExchangeId(exchangeKey) {
+    return String(exchangeKey || '').split('_')[0];
+}
+
 function formatNumber(value) {
     return Math.round(value).toLocaleString('ko-KR');
 }
@@ -362,6 +383,48 @@ function formatPercent(value) {
     return `${sign}${value.toFixed(2)}%`;
 }
 
+function formatTimeLabel(ts) {
+    if (!Number.isFinite(ts) || ts <= 0) return '-';
+    return new Date(ts).toLocaleTimeString('ko-KR', { hour12: false });
+}
+
+function setLiveState(isLive) {
+    if (!liveBadge) return;
+    liveBadge.textContent = isLive ? 'LIVE' : 'DELAY';
+    liveBadge.classList.toggle('offline', !isLive);
+}
+
+function updateKpiCards({ rows = [], usdKrw = null } = {}) {
+    const usdtRow = rows.find((row) => row.symbol === 'USDT');
+    if (kpiTetherGimp) kpiTetherGimp.textContent = usdtRow ? formatPercent(usdtRow.gimp) : '-';
+    if (kpiUsdKrw) kpiUsdKrw.textContent = Number.isFinite(usdKrw) ? formatNumber(usdKrw) : '-';
+    if (kpiUpbitUsdt) kpiUpbitUsdt.textContent = usdtRow ? formatNumber(usdtRow.price) : '-';
+    if (kpiTrackedCount) kpiTrackedCount.textContent = rows.length ? `${rows.length}개` : '-';
+    if (kpiSelectedPair) kpiSelectedPair.textContent = selectedExchangePair?.textContent || '-';
+}
+
+async function refreshAuxKpis() {
+    try {
+        const [bithumb, status] = await Promise.all([
+            fetchJson('https://api.bithumb.com/public/ticker/USDT_KRW').catch(() => null),
+            fetchJson(`${API_BASE}/status`).catch(() => null),
+        ]);
+        const bithumbUsdt = Number(bithumb?.data?.closing_price);
+        if (kpiBithumbUsdt && Number.isFinite(bithumbUsdt)) {
+            kpiBithumbUsdt.textContent = formatNumber(bithumbUsdt);
+        }
+        const symbols = Number(status?.symbols);
+        if (kpiTrackedCount && kpiTrackedCount.textContent === '-' && Number.isFinite(symbols)) {
+            kpiTrackedCount.textContent = `${symbols}개`;
+        }
+        if (lastUpdatedLabel && Number.isFinite(Number(status?.lastPushAt))) {
+            lastUpdatedLabel.textContent = formatTimeLabel(Number(status.lastPushAt));
+        }
+    } catch (_error) {
+        // no-op
+    }
+}
+
 function formatRawQuote(value) {
     if (!Number.isFinite(value)) return '-';
     return value.toLocaleString('en-US', { maximumFractionDigits: 6 });
@@ -374,7 +437,7 @@ function getCoinLogoUrl(symbol) {
 }
 
 function getExchangeBadgeText(exchangeKey) {
-    const base = String(exchangeKey || '').split('_')[0];
+    const base = baseExchangeId(exchangeKey);
     if (base === 'upbit') return 'UP';
     if (base === 'bithumb') return 'BT';
     if (base === 'coinone') return 'CO';
@@ -388,7 +451,7 @@ function getExchangeBadgeText(exchangeKey) {
 }
 
 function getExchangeLogoCandidates(exchangeKey) {
-    const base = String(exchangeKey || '').split('_')[0];
+    const base = baseExchangeId(exchangeKey);
     const favicon = (domain) => `https://www.google.com/s2/favicons?domain=${domain}&sz=64`;
     const logos = {
         upbit: [
@@ -582,18 +645,27 @@ function normalizeWorkerAssetStatusPayload(raw, domesticKey, foreignKey) {
     if (raw.exchanges && !Array.isArray(raw.exchanges)) return raw;
     const list = Array.isArray(raw.exchanges) ? raw.exchanges : [];
     const byExchange = {};
+    const statusMatchesExchange = (status, exchangeKey) => {
+        if (!status || typeof status !== 'object') return false;
+        const expectedBase = baseExchangeId(exchangeKey);
+        const actualBase = baseExchangeId(status.exchange || exchangeKey);
+        return expectedBase && actualBase && expectedBase === actualBase;
+    };
+
     list.forEach((item) => {
         const key = String(item?.exchange || '').trim();
         if (!key) return;
         byExchange[key] = item;
-        const base = key.split('_')[0];
+        const base = baseExchangeId(key);
         if (base && !byExchange[base]) byExchange[base] = item;
     });
 
-    const domesticBase = String(domesticKey || '').split('_')[0];
-    const foreignBase = String(foreignKey || '').split('_')[0];
-    const domesticStatus = byExchange[domesticKey] || byExchange[domesticBase] || null;
-    const foreignStatus = byExchange[foreignKey] || byExchange[foreignBase] || null;
+    const domesticBase = baseExchangeId(domesticKey);
+    const foreignBase = baseExchangeId(foreignKey);
+    const domesticCandidate = byExchange[domesticKey] || byExchange[domesticBase] || null;
+    const foreignCandidate = byExchange[foreignKey] || byExchange[foreignBase] || null;
+    const domesticStatus = statusMatchesExchange(domesticCandidate, domesticKey) ? domesticCandidate : null;
+    const foreignStatus = statusMatchesExchange(foreignCandidate, foreignKey) ? foreignCandidate : null;
 
     return {
         ...raw,
@@ -628,6 +700,9 @@ async function fetchAssetStatus(symbol, domesticKey, foreignKey) {
             const serverData = normalizeWorkerAssetStatusPayload(serverDataRaw, domesticKey, foreignKey);
             const needsClientEnrichment = [domesticKey, foreignKey].some((exchangeKey) => {
                 const status = serverData?.exchanges?.[exchangeKey];
+                const exchangeBase = baseExchangeId(exchangeKey);
+                if (exchangeBase === 'upbit') return false;
+                if (status?.source === 'upbit-notice-parser') return false;
                 const networks = Array.isArray(status?.networks) ? status.networks : [];
                 if (networks.length === 0) return true;
                 const hasKnownState = networks.some((n) => n?.deposit === true || n?.deposit === false || n?.withdraw === true || n?.withdraw === false);
@@ -653,14 +728,20 @@ async function fetchAssetStatus(symbol, domesticKey, foreignKey) {
 }
 
 function mergeAssetStatusPayload(primary, fallback, domesticKey, foreignKey) {
+    const statusFor = (payload, exchangeKey) => {
+        const status = payload?.exchanges?.[exchangeKey];
+        if (!status || typeof status !== 'object') return null;
+        if (baseExchangeId(status.exchange || exchangeKey) !== baseExchangeId(exchangeKey)) return null;
+        return status;
+    };
     const pickStatus = (primaryStatus, fallbackStatus) => {
         const primaryNetworks = Array.isArray(primaryStatus?.networks) ? primaryStatus.networks : [];
         const fallbackNetworks = Array.isArray(fallbackStatus?.networks) ? fallbackStatus.networks : [];
         const primaryHasKnownState = primaryNetworks.some((n) => n?.deposit === true || n?.deposit === false || n?.withdraw === true || n?.withdraw === false);
         const fallbackHasKnownState = fallbackNetworks.some((n) => n?.deposit === true || n?.deposit === false || n?.withdraw === true || n?.withdraw === false);
-        if (fallbackHasKnownState && !primaryHasKnownState) return fallbackStatus;
-        if (!primaryNetworks.length && fallbackNetworks.length) return fallbackStatus;
-        return primaryStatus || fallbackStatus;
+        if (primaryHasKnownState || primaryNetworks.length) return primaryStatus;
+        if (fallbackHasKnownState || fallbackNetworks.length) return fallbackStatus;
+        return primaryStatus || fallbackStatus || null;
     };
 
     return {
@@ -669,16 +750,22 @@ function mergeAssetStatusPayload(primary, fallback, domesticKey, foreignKey) {
         exchanges: {
             ...(fallback?.exchanges || {}),
             ...(primary?.exchanges || {}),
-            [domesticKey]: pickStatus(primary?.exchanges?.[domesticKey], fallback?.exchanges?.[domesticKey]),
-            [foreignKey]: pickStatus(primary?.exchanges?.[foreignKey], fallback?.exchanges?.[foreignKey]),
+            [domesticKey]: pickStatus(
+                statusFor(primary, domesticKey),
+                statusFor(fallback, domesticKey)
+            ),
+            [foreignKey]: pickStatus(
+                statusFor(primary, foreignKey),
+                statusFor(fallback, foreignKey)
+            ),
         },
     };
 }
 
 async function fetchAssetStatusClientFallback(symbol, domesticKey, foreignKey) {
     const upper = String(symbol || '').toUpperCase();
-    const domesticBase = String(domesticKey || '').split('_')[0];
-    const foreignBase = String(foreignKey || '').split('_')[0];
+    const domesticBase = baseExchangeId(domesticKey);
+    const foreignBase = baseExchangeId(foreignKey);
 
     const payload = {
         symbol: upper,
@@ -762,7 +849,9 @@ async function fetchAssetStatusClientFallback(symbol, domesticKey, foreignKey) {
             exchange: domesticKey,
             label: domesticExchangeMeta[domesticKey]?.label || domesticKey,
             summary: { deposit: null, withdraw: null },
-            networks: [{ network: '공개 API 미지원', deposit: null, withdraw: null }],
+            source: 'upbit-notice-parser',
+            error: 'Upbit notice parser data unavailable',
+            networks: [],
         };
     }
 
@@ -1442,13 +1531,95 @@ function updateSortIndicators() {
     });
 }
 
+function rowHtmlForCoin(coin) {
+    const gimpTone = getValueToneClass(coin.gimp);
+    const changeTone = getValueToneClass(coin.change);
+    return `
+        <td class="cell-name">
+            <div class="cell-main main-value coin-row-main">
+                <img class="coin-logo" src="${getCoinLogoUrl(coin.symbol)}" alt="${coin.symbol}" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none';" />
+                <span>${coin.name}</span>
+            </div>
+            <div class="cell-sub sub-value">${coin.symbol}</div>
+        </td>
+        <td class="cell-num">
+            <div class="cell-main main-value">${formatNumber(coin.price)}</div>
+        </td>
+        <td class="cell-num">
+            <div class="cell-main main-value">${formatRawQuote(coin.globalPrice)}</div>
+        </td>
+        <td class="cell-num ${gimpTone}">
+            <div class="cell-main main-value">${formatPercent(coin.gimp)}</div>
+        </td>
+        <td class="cell-num ${changeTone}">
+            <div class="cell-main main-value">${formatPercent(coin.change)}</div>
+        </td>
+        <td class="cell-num">
+            <div class="cell-main main-value">${formatVolumeKrw(coin.volume)}</div>
+        </td>
+    `;
+}
+
+function updateRowElement(row, coin) {
+    row.classList.toggle('active-row', coin.symbol === tableState.selectedSymbol);
+    row.innerHTML = rowHtmlForCoin(coin);
+}
+
+function createRowElement(coin) {
+    const row = document.createElement('tr');
+    row.dataset.symbol = coin.symbol;
+    updateRowElement(row, coin);
+    return row;
+}
+
+function applyRowsInPlace(sortedRows) {
+    const existingRows = Array.from(cryptoTableBody.querySelectorAll('tr[data-symbol]'));
+    if (!existingRows.length || existingRows.length !== sortedRows.length) return false;
+
+    const existingBySymbol = new Map(existingRows.map((row) => [row.dataset.symbol, row]));
+    if (existingBySymbol.size !== sortedRows.length) return false;
+    for (const coin of sortedRows) {
+        if (!existingBySymbol.has(coin.symbol)) return false;
+    }
+
+    const detailRow = tableState.selectedSymbol
+        ? cryptoTableBody.querySelector(`tr.detail-row[data-detail-for="${tableState.selectedSymbol}"]`)
+        : null;
+    if (detailRow) detailRow.remove();
+
+    sortedRows.forEach((coin) => {
+        const row = existingBySymbol.get(coin.symbol);
+        if (!row) return;
+        updateRowElement(row, coin);
+        cryptoTableBody.appendChild(row);
+    });
+
+    if (detailRow && tableState.selectedSymbol) {
+        const selectedRow = cryptoTableBody.querySelector(`tr[data-symbol="${tableState.selectedSymbol}"]`);
+        if (selectedRow) {
+            selectedRow.insertAdjacentElement('afterend', detailRow);
+        }
+    }
+    return true;
+}
+
+function updateRowsTextOnly(rows) {
+    const bySymbol = new Map(rows.map((coin) => [coin.symbol, coin]));
+    const domRows = Array.from(cryptoTableBody.querySelectorAll('tr[data-symbol]'));
+    domRows.forEach((row) => {
+        const coin = bySymbol.get(row.dataset.symbol);
+        if (!coin) return;
+        updateRowElement(row, coin);
+    });
+}
+
 function renderRows() {
     const sorted = [...tableState.rows].sort((a, b) => (
         compareRows(a, b, tableState.sortKey, tableState.sortDirection)
     ));
 
     if (sorted.length === 0) {
-        cryptoTableBody.innerHTML = '<tr><td colspan="5">표시할 종목이 없습니다.</td></tr>';
+        cryptoTableBody.innerHTML = '<tr><td colspan="6">표시할 종목이 없습니다.</td></tr>';
         updateSortIndicators();
         return;
     }
@@ -1457,36 +1628,10 @@ function renderRows() {
     sorted.forEach((coin) => {
         const row = document.createElement('tr');
         row.dataset.symbol = coin.symbol;
-        row.classList.toggle('active-row', coin.symbol === tableState.selectedSymbol);
-        const gimpTone = getValueToneClass(coin.gimp);
-        const changeTone = getValueToneClass(coin.change);
-        const globalChangeTone = getValueToneClass(coin.globalChange);
-        row.innerHTML = `
-            <td class="cell-name">
-                <div class="cell-main main-value coin-row-main">
-                    <img class="coin-logo" src="${getCoinLogoUrl(coin.symbol)}" alt="${coin.symbol}" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none';" />
-                    <span>${coin.name}</span>
-                </div>
-                <div class="cell-sub sub-value">${coin.symbol}</div>
-            </td>
-            <td class="cell-num">
-                <div class="cell-main main-value">${formatNumber(coin.price)}</div>
-                <div class="cell-sub sub-value">${formatRawQuote(coin.globalPrice)}</div>
-            </td>
-            <td class="cell-num ${gimpTone}">
-                <div class="cell-main main-value">${formatPercent(coin.gimp)}</div>
-            </td>
-            <td class="cell-num ${changeTone}">
-                <div class="cell-main main-value">${formatPercent(coin.change)}</div>
-                <div class="cell-sub sub-value ${globalChangeTone}">${formatPercent(coin.globalChange)}</div>
-            </td>
-            <td class="cell-num">
-                <div class="cell-main main-value">${formatVolumeKrw(coin.volume)}</div>
-                <div class="cell-sub sub-value">${formatVolumeKrw(coin.globalVolume)}</div>
-            </td>
-        `;
+        updateRowElement(row, coin);
         cryptoTableBody.appendChild(row);
         if (coin.symbol === tableState.selectedSymbol) {
+            tableState.openSymbol = coin.symbol;
             const detailRow = createDetailRow(coin);
             cryptoTableBody.appendChild(detailRow);
             renderDetailCharts(coin.symbol, tableState.detailInterval);
@@ -1501,7 +1646,8 @@ function renderExchangeStatusBlock(status) {
     const summaryDeposit = status?.summary?.deposit ?? status?.deposit ?? status?.deposit_enabled;
     const summaryWithdraw = status?.summary?.withdraw ?? status?.withdraw ?? status?.withdraw_enabled;
     const networks = Array.isArray(status?.networks) ? status.networks : [];
-    const errorText = String(status?.error || '').trim();
+    const rawErrorText = String(status?.error || '').trim();
+    const errorText = /No matching Upbit notice event for coin/i.test(rawErrorText) ? '' : rawErrorText;
     const exchangeKey = String(status?.exchange || exchangeName).toLowerCase();
     const logoCandidates = getExchangeLogoCandidates(exchangeKey);
     const logoSrc = logoCandidates[0] || '';
@@ -1572,12 +1718,21 @@ function buildGlobalTvSymbol(exchangeKey, symbol) {
 }
 
 function renderDetailCharts(symbol, interval) {
+    const domesticKey = domesticExchangeSelect.value;
+    const globalKey = globalExchangeSelect.value;
     const upbitContainer = document.getElementById(`detail-upbit-${symbol}`);
     const binanceContainer = document.getElementById(`detail-binance-${symbol}`);
     if (!upbitContainer || !binanceContainer) return;
 
-    const domesticKey = domesticExchangeSelect.value;
-    const globalKey = globalExchangeSelect.value;
+    const sameConfig =
+        detailChartRenderState.symbol === symbol &&
+        detailChartRenderState.domestic === domesticKey &&
+        detailChartRenderState.foreign === globalKey &&
+        detailChartRenderState.interval === interval &&
+        upbitContainer.querySelector('iframe') &&
+        binanceContainer.querySelector('iframe');
+    if (sameConfig) return;
+
     const upbitSrc = buildTradingViewEmbedUrl(buildDomesticTvSymbol(domesticKey, symbol), interval);
     const binanceSrc = buildTradingViewEmbedUrl(buildGlobalTvSymbol(globalKey, symbol), interval);
     upbitContainer.innerHTML = `
@@ -1598,6 +1753,10 @@ function renderDetailCharts(symbol, interval) {
             referrerpolicy="no-referrer"
         ></iframe>
     `;
+    detailChartRenderState.symbol = symbol;
+    detailChartRenderState.domestic = domesticKey;
+    detailChartRenderState.foreign = globalKey;
+    detailChartRenderState.interval = interval;
 }
 
 async function hydrateDetailStatus(symbol) {
@@ -1639,7 +1798,7 @@ function createDetailRow(coin) {
     const foreignLabel = globalExchangeMeta[globalExchangeSelect.value]?.label || globalExchangeSelect.value;
 
     detailRow.innerHTML = `
-        <td colspan="5">
+        <td colspan="6">
             <div class="detail-panel">
                 <div class="detail-status-grid">
                     <div class="exchange-status-card" id="detail-status-domestic-${coin.symbol}">
@@ -1719,7 +1878,7 @@ function renderPairCharts(symbol) {
 }
 
 function setLoadingRow(text) {
-    cryptoTableBody.innerHTML = `<tr><td colspan="5">${text}</td></tr>`;
+    cryptoTableBody.innerHTML = `<tr><td colspan="6">${text}</td></tr>`;
 }
 
 async function loadMarketRows(options = {}) {
@@ -1779,7 +1938,12 @@ async function loadMarketRows(options = {}) {
             });
         });
 
-        tableState.rows = rows;
+    tableState.rows = rows;
+        updateKpiCards({ rows, usdKrw });
+        setLiveState(true);
+        if (lastUpdatedLabel) {
+            lastUpdatedLabel.textContent = formatTimeLabel(Date.now());
+        }
         if (rows.length === 0) {
             if (!silent) {
                 setLoadingRow('매칭되는 종목이 없어 표시할 데이터가 없습니다. 거래소 조합을 변경해보세요.');
@@ -1790,7 +1954,26 @@ async function loadMarketRows(options = {}) {
         lastRestFetchAt = Date.now();
         hasSuccessfulRender = true;
         saveRowsToCache(rows);
-        renderRows();
+        if (tableState.selectedSymbol) {
+            const selectedExists = rows.some((row) => row.symbol === tableState.selectedSymbol);
+            if (!selectedExists) {
+                tableState.selectedSymbol = null;
+                tableState.openSymbol = null;
+                detailChartRenderState.symbol = null;
+                renderRows();
+                return;
+            }
+            const sorted = [...rows].sort((a, b) => (
+                compareRows(a, b, tableState.sortKey, tableState.sortDirection)
+            ));
+            const moved = applyRowsInPlace(sorted);
+            if (!moved) {
+                updateRowsTextOnly(rows);
+            }
+            updateSortIndicators();
+        } else {
+            renderRows();
+        }
 
         nameMapPromise.then((nameMap) => {
             if (requestId !== latestRequestId || !nameMap || typeof nameMap !== 'object') return;
@@ -1803,7 +1986,18 @@ async function loadMarketRows(options = {}) {
             });
             if (changed) {
                 saveRowsToCache(tableState.rows);
-                renderRows();
+                if (tableState.selectedSymbol) {
+                    const sorted = [...tableState.rows].sort((a, b) => (
+                        compareRows(a, b, tableState.sortKey, tableState.sortDirection)
+                    ));
+                    const moved = applyRowsInPlace(sorted);
+                    if (!moved) {
+                        updateRowsTextOnly(tableState.rows);
+                    }
+                    updateSortIndicators();
+                } else {
+                    renderRows();
+                }
             }
         }).catch(() => {});
     } catch (error) {
@@ -1822,6 +2016,7 @@ async function loadMarketRows(options = {}) {
         if (!silent) {
             setLoadingRow('실시간 종목 데이터를 불러오는 중...');
         }
+        setLiveState(false);
     }
 }
 
@@ -1882,7 +2077,7 @@ function switchToRestFallback(reason = '') {
 
 function getClientRefreshMs() {
     const selected = Number(refreshIntervalSelect?.value);
-    return Number.isFinite(selected) && selected >= 100 ? selected : DEFAULT_REFRESH_MS;
+    return Number.isFinite(selected) && selected >= 1000 ? selected : DEFAULT_REFRESH_MS;
 }
 
 function mapDoRowsToTableRows(doRows) {
@@ -1908,14 +2103,34 @@ function applyDoSnapshot(snapshot) {
     const global = globalExchangeMeta[globalExchangeSelect.value]?.label || '바이낸스';
     tableState.globalExchangeLabel = global;
     selectedExchangePair.textContent = `${domestic} / ${global}`;
+    updateKpiCards({ rows, usdKrw: Number(snapshot?.fxRate) });
+    setLiveState(true);
+    if (lastUpdatedLabel) {
+        lastUpdatedLabel.textContent = formatTimeLabel(Number(snapshot?.timestamp) || Date.now());
+    }
 
     if (!rows.length) {
         setLoadingRow('실시간 허브에서 수신된 데이터가 없습니다.');
         return;
     }
 
-    if (tableState.selectedSymbol && !rows.some((r) => r.symbol === tableState.selectedSymbol)) {
-        tableState.selectedSymbol = null;
+    const sorted = [...tableState.rows].sort((a, b) => (
+        compareRows(a, b, tableState.sortKey, tableState.sortDirection)
+    ));
+    const hasOpenDetail = Boolean(tableState.selectedSymbol);
+    if (hasOpenDetail) {
+        const selectedExists = rows.some((r) => r.symbol === tableState.selectedSymbol);
+        if (!selectedExists) {
+            tableState.selectedSymbol = null;
+            tableState.openSymbol = null;
+            detailChartRenderState.symbol = null;
+            renderRows();
+            return;
+        }
+        // Keep detail panel and iframes mounted; only update row text values.
+        updateRowsTextOnly(rows);
+        updateSortIndicators();
+        return;
     }
     renderRows();
 }
@@ -2033,6 +2248,7 @@ sortableHeaders.forEach((header) => {
 
 domesticExchangeSelect.addEventListener('change', () => {
     detailStatusCache.clear();
+    detailChartRenderState.symbol = null;
     if (doEnabled && isDoPreferredPair()) {
         sendDoSubscribe();
     }
@@ -2040,6 +2256,7 @@ domesticExchangeSelect.addEventListener('change', () => {
 });
 globalExchangeSelect.addEventListener('change', () => {
     detailStatusCache.clear();
+    detailChartRenderState.symbol = null;
     if (doEnabled && isDoPreferredPair()) {
         sendDoSubscribe();
     }
@@ -2053,7 +2270,7 @@ refreshIntervalSelect.addEventListener('change', () => {
         }
     } else {
         const nextMs = Number(refreshIntervalSelect.value);
-        liveRefreshMs = Number.isFinite(nextMs) && nextMs >= 100 ? nextMs : DEFAULT_REFRESH_MS;
+        liveRefreshMs = Number.isFinite(nextMs) && nextMs >= 1000 ? nextMs : DEFAULT_REFRESH_MS;
         if (!document.hidden) {
             startLiveRefresh();
         }
@@ -2067,7 +2284,11 @@ cryptoTableBody.addEventListener('click', (event) => {
         if (!nextInterval) return;
         tableState.detailInterval = nextInterval;
         if (tableState.selectedSymbol) {
-            renderRows();
+            const detailIntervals = cryptoTableBody.querySelector(`tr.detail-row[data-detail-for="${tableState.selectedSymbol}"] .detail-intervals`);
+            if (detailIntervals) {
+                detailIntervals.innerHTML = buildDetailIntervalButtons();
+            }
+            renderDetailCharts(tableState.selectedSymbol, tableState.detailInterval);
         }
         return;
     }
@@ -2077,11 +2298,14 @@ cryptoTableBody.addEventListener('click', (event) => {
 
     if (tableState.selectedSymbol === row.dataset.symbol) {
         tableState.selectedSymbol = null;
+        tableState.openSymbol = null;
+        detailChartRenderState.symbol = null;
         renderRows();
         return;
     }
 
     tableState.selectedSymbol = row.dataset.symbol;
+    tableState.openSymbol = row.dataset.symbol;
     renderRows();
 });
 
@@ -2095,6 +2319,9 @@ loadChart();
 initExchangeSelectLogos();
 hydrateRowsFromCache();
 liveRefreshMs = Number(refreshIntervalSelect.value) || DEFAULT_REFRESH_MS;
+setLiveState(true);
+refreshAuxKpis();
+setInterval(refreshAuxKpis, 15000);
 startLiveRefresh();
 if (doEnabled) {
     connectDoStream();
